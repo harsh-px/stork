@@ -10,6 +10,7 @@ import (
 	"github.com/libopenstorage/stork/drivers/volume"
 	_ "github.com/libopenstorage/stork/drivers/volume/portworx"
 	"github.com/libopenstorage/stork/pkg/extender"
+	"github.com/libopenstorage/stork/pkg/initializer"
 	"github.com/libopenstorage/stork/pkg/monitor"
 	"github.com/libopenstorage/stork/pkg/snapshot"
 	log "github.com/sirupsen/logrus"
@@ -56,7 +57,7 @@ func main() {
 		},
 		cli.BoolTFlag{
 			Name:  "leader-elect",
-			Usage: "Enable leader election",
+			Usage: "Enable leader election (default: true)",
 		},
 		cli.StringFlag{
 			Name:  "lock-object-name",
@@ -67,6 +68,22 @@ func main() {
 			Name:  "lock-object-namespace",
 			Usage: "Namespace for the lock object (default: kube-system)",
 			Value: "kube-system",
+		},
+		cli.BoolTFlag{
+			Name:  "snapshotter",
+			Usage: "Enable snapshotter (default: true)",
+		},
+		cli.BoolTFlag{
+			Name:  "extender",
+			Usage: "Enable scheduler extender for hyperconvergence (default: true)",
+		},
+		cli.BoolTFlag{
+			Name:  "health-monitor",
+			Usage: "Enable health monitoring of storage (default: true)",
+		},
+		cli.BoolFlag{
+			Name:  "app-initializer",
+			Usage: "EXPERIMENTAL: Enable application initializer to update scheduler name automatically (default: false)",
 		},
 	}
 
@@ -98,17 +115,19 @@ func run(c *cli.Context) {
 		os.Exit(-1)
 	}
 
-	ext = &extender.Extender{
-		Driver: d,
-	}
+	if c.Bool("extender") {
+		ext = &extender.Extender{
+			Driver: d,
+		}
 
-	if err = ext.Start(); err != nil {
-		log.Fatalf("Error starting scheduler extender: %v", err)
-		os.Exit(-1)
+		if err = ext.Start(); err != nil {
+			log.Fatalf("Error starting scheduler extender: %v", err)
+			os.Exit(-1)
+		}
 	}
 
 	runFunc := func(_ <-chan struct{}) {
-		runStork(d)
+		runStork(d, c)
 	}
 
 	leaderConfig := leaderelectionconfig.DefaultLeaderElectionConfiguration()
@@ -183,23 +202,35 @@ func run(c *cli.Context) {
 	}
 }
 
-func runStork(d volume.Driver) {
+func runStork(d volume.Driver, c *cli.Context) {
+	initializer := &initializer.Initializer{
+		Driver: d,
+	}
+	if c.Bool("app-initializer") {
+		if err := initializer.Start(); err != nil {
+			log.Fatalf("Error starting initializer: %v", err)
+			os.Exit(-1)
+		}
+	}
+
 	monitor := &monitor.Monitor{
 		Driver: d,
 	}
-
-	if err := monitor.Start(); err != nil {
-		log.Fatalf("Error starting storage monitor: %v", err)
-		os.Exit(-1)
+	if c.Bool("health-monitor") {
+		if err := monitor.Start(); err != nil {
+			log.Fatalf("Error starting storage monitor: %v", err)
+			os.Exit(-1)
+		}
 	}
 
 	snapshotController := &snapshotcontroller.SnapshotController{
 		Driver: d,
 	}
-
-	if err := snapshotController.Start(); err != nil {
-		log.Fatalf("Error starting snapshot controller: %v", err)
-		os.Exit(-1)
+	if c.Bool("snapshotter") {
+		if err := snapshotController.Start(); err != nil {
+			log.Fatalf("Error starting snapshot controller: %v", err)
+			os.Exit(-1)
+		}
 	}
 
 	signalChan := make(chan os.Signal, 1)

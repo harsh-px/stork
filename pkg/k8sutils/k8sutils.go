@@ -131,7 +131,7 @@ func GetStorageClassName(pvc *v1.PersistentVolumeClaim) string {
 }
 
 // GetStorageClass Gets the storage class by name
-func GetStorageClass(storageClassName string, namespace string) (*storagev1.StorageClass, error) {
+func GetStorageClass(storageClassName string) (*storagev1.StorageClass, error) {
 	if storageClassName == "" {
 		return nil, fmt.Errorf("Empty storage class name")
 	}

@@ -119,7 +119,7 @@ func (e *Extender) processFilterRequest(w http.ResponseWriter, req *http.Request
 	}
 
 	filteredNodes := []v1.Node{}
-	driverVolumes, err := e.Driver.GetPodVolumes(pod)
+	driverVolumes, err := e.Driver.GetPodVolumes(&pod.Spec, pod.Namespace)
 
 	if err != nil {
 		storklog.PodLog(pod).Warnf("Error getting volumes for Pod for driver: %v", err)
@@ -193,7 +193,7 @@ func (e *Extender) processPrioritizeRequest(w http.ResponseWriter, req *http.Req
 	respList := schedulerapi.HostPriorityList{}
 	priorityMap := make(map[string]int)
 
-	driverVolumes, err := e.Driver.GetPodVolumes(pod)
+	driverVolumes, err := e.Driver.GetPodVolumes(&pod.Spec, pod.Namespace)
 	if err != nil {
 		storklog.PodLog(pod).Warnf("Error getting volumes for Pod for driver: %v", err)
 		if _, ok := err.(*volume.ErrPVCPending); ok {
