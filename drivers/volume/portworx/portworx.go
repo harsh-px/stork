@@ -377,9 +377,9 @@ func (p *portworx) SnapshotCreate(
 				return nil, getErrorSnapshotConditions(err), err
 			}
 
-			snapIDs := make([]string, 0)
 			snapDataNames := make([]string, 0)
 			failedSnapVols := make([]string, 0)
+			snapIDs := make([]string, 0)
 
 			// Loop through the response and check if all succeeded. Don't create any k8s objects if
 			// any of the snapshots failed
@@ -391,28 +391,35 @@ func (p *portworx) SnapshotCreate(
 
 				if newSnapResp.GetVolumeCreateResponse().GetVolumeResponse() != nil &&
 					len(newSnapResp.GetVolumeCreateResponse().GetVolumeResponse().GetError()) != 0 {
-					logrus.Errorf("Failed to create snapshot for volume: %s due to: %v",
+					logrus.Errorf("failed to create snapshot for volume: %s due to: %v",
 						volID, newSnapResp.GetVolumeCreateResponse().GetVolumeResponse().GetError())
 					failedSnapVols = append(failedSnapVols, volID)
 					continue
 				}
+
+				snapIDs = append(snapIDs, newSnapResp.GetVolumeCreateResponse().GetId())
 			}
 
 			if len(failedSnapVols) > 0 {
-				err = fmt.Errorf("all snapshots in the group did not succeed. failed: %v succeeded: %v",
-					failedSnapVols, snapIDs)
+				p.revertPXSnaps(snapIDs)
+
+				err = fmt.Errorf("all snapshots in the group did not succeed. failed: %v succeeded: %v", failedSnapVols, snapIDs)
 				return nil, getErrorSnapshotConditions(err), err
 			}
 
+			createdSnapObjs := make([]*crdv1.VolumeSnapshot, 0)
 			for _, newSnapResp := range resp.Snapshots {
 				newSnapID := newSnapResp.GetVolumeCreateResponse().GetId()
 				snapObj, err := p.createVolumeSnapshotCRD(newSnapID, newSnapResp, groupID, groupLabels, snap)
 				if err != nil {
-					err = fmt.Errorf("failed to create CRD for PX snapshot: %s due to: %v", newSnapID, err)
+					p.revertPXSnaps(snapIDs)
+					p.revertSnapObjs(createdSnapObjs)
+
+					err = fmt.Errorf("failed to create VolumeSnapshot object for PX snapshot: %s due to: %v", newSnapID, err)
 					return nil, getErrorSnapshotConditions(err), err
 				}
 
-				snapIDs = append(snapIDs, newSnapID)
+				createdSnapObjs = append(createdSnapObjs, snapObj)
 				snapDataNames = append(snapDataNames, snapObj.Spec.SnapshotDataName)
 			}
 
@@ -483,7 +490,14 @@ func (p *portworx) SnapshotDelete(snapDataSrc *crdv1.VolumeSnapshotDataSource, _
 					snapName := snapData.Spec.VolumeSnapshotRef.Name
 
 					logrus.Infof("Deleting VolumeSnapshot:[%s] %s", snapNamespace, snapName)
-					err = k8s.Instance().DeleteSnapshot(snapName, snapNamespace)
+					err = wait.ExponentialBackoff(snapAPICallBackoff, func() (bool, error) {
+						err = k8s.Instance().DeleteSnapshot(snapName, snapNamespace)
+						if err != nil {
+							return false, nil
+						}
+
+						return true, nil
+					})
 					if err != nil {
 						lastError = err
 						logrus.Errorf("failed to get volume snapshot: [%s] %s due to err: %v", snapNamespace, snapName, err)
@@ -692,7 +706,25 @@ func (p *portworx) createVolumeSnapshotCRD(
 
 		return true, nil
 	})
-	return snap, err
+	if err != nil {
+		// revert snapdata
+		deleteErr := wait.ExponentialBackoff(snapAPICallBackoff, func() (bool, error) {
+			deleteErr := k8s.Instance().DeleteSnapshotData(snapData.Metadata.Name)
+			if err != nil {
+				logrus.Errorf("failed to delete volumesnapshotdata due to err: %v", deleteErr)
+				return false, nil
+			}
+
+			return true, nil
+		})
+		if deleteErr != nil {
+			logrus.Errorf("failed to revert volumesnapshotdata due to: %v", deleteErr)
+		}
+
+		return nil, err
+	}
+
+	return snap, nil
 }
 
 func (p *portworx) createVolumeSnapshotData(
@@ -813,6 +845,61 @@ func (p *portworx) checkCloudSnapStatus(volID string) (string, error) {
 
 	logrus.Infof("cloudsnap backup: %s created successfully. %s", csStatus.ID, statusStr)
 	return csStatus.ID, nil
+}
+
+// revertPXSnaps deletes all given snapIDs
+func (p *portworx) revertPXSnaps(snapIDs []string) {
+	failedDeletions := make(map[string]error, 0)
+	for _, id := range snapIDs {
+		err := p.volDriver.Delete(id)
+		if err != nil {
+			failedDeletions[id] = err
+		}
+	}
+
+	if len(failedDeletions) > 0 {
+		errString := ""
+		for failedID, failedErr := range failedDeletions {
+			errString = fmt.Sprintf("%s delete of %s failed due to err: %v.\n", errString, failedID, failedErr)
+		}
+
+		logrus.Errorf("failed to revert created PX snapshots. err: %s", errString)
+		return
+	}
+
+	logrus.Infof("successfully reverted PX snapshots")
+	return
+}
+
+func (p *portworx) revertSnapObjs(snapObjs []*crdv1.VolumeSnapshot) {
+	failedDeletions := make(map[string]error, 0)
+
+	for _, snap := range snapObjs {
+		err := wait.ExponentialBackoff(snapAPICallBackoff, func() (bool, error) {
+			deleteErr := k8s.Instance().DeleteSnapshot(snap.Metadata.Name, snap.Metadata.Namespace)
+			if deleteErr != nil {
+				logrus.Infof("failed to delete volumesnapshot due to: %v", deleteErr)
+				return false, nil
+			}
+
+			return true, nil
+		})
+		if err != nil {
+			failedDeletions[fmt.Sprintf("[%s] %s")] = err
+		}
+	}
+
+	if len(failedDeletions) > 0 {
+		errString := ""
+		for failedID, failedErr := range failedDeletions {
+			errString = fmt.Sprintf("%s delete of %s failed due to err: %v.\n", errString, failedID, failedErr)
+		}
+
+		logrus.Errorf("failed to revert created volumesnapshots. err: %s", errString)
+		return
+	}
+
+	logrus.Infof("successfully reverted volumesnapshots")
 }
 
 func getSnapshotType(snap *crdv1.VolumeSnapshot) (crdv1.PortworxSnapshotType, error) {
