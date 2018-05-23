@@ -58,7 +58,7 @@ func setup(t *testing.T) {
 	schedulerDriver, err = scheduler.Get(schedulerDriverName)
 	require.NoError(t, err, "Error getting scheduler driver %v", schedulerDriverName)
 
-	err = schedulerDriver.Init("/specs", volumeDriverName, nodeDriverName)
+	err = schedulerDriver.Init("specs", volumeDriverName, nodeDriverName)
 	require.NoError(t, err, "Error initializing scheduler driver %v", schedulerDriverName)
 
 	volumeDriver, err = volume.Get(volumeDriverName)
@@ -73,10 +73,10 @@ func TestMain(t *testing.T) {
 	if passed := t.Run("setup", setup); !passed {
 		t.FailNow()
 	}
-	t.Run("Extender", testExtender)
-	t.Run("HealthMonitor", testHealthMonitor)
+	//t.Run("Extender", testExtender)
+	//t.Run("HealthMonitor", testHealthMonitor)
 	t.Run("Snapshot", testSnapshot)
-	t.Run("CmdExecutor", asyncPodCommandTest)
+	//t.Run("CmdExecutor", asyncPodCommandTest)
 }
 
 func generateInstanceID(t *testing.T, testName string) string {

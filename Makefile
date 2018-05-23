@@ -10,6 +10,10 @@ ifndef PKGS
 PKGS := $(shell go list ./... 2>&1 | grep -v 'github.com/libopenstorage/stork/vendor' | grep -v 'pkg/client/informers/externalversions' | grep -v versioned | grep -v 'pkg/apis/stork.com')
 endif
 
+ifndef GOVET_PKGS
+GOVET_PKGS=$(shell  go list ./... | grep -v vendor | grep -v pkg/client/informers/externalversions | grep -v versioned | grep -v pkg/apis/stork.com)
+endif
+
 ifeq ($(BUILD_TYPE),debug)
 BUILDFLAGS += -gcflags "-N -l"
 endif
@@ -82,17 +86,17 @@ lint:
 	done
 
 vet:
-	go vet $(PKGS)
+	go vet $(GOVET_PKGS)
 
 $(GOPATH)/bin/gosimple:
 	go get -u honnef.co/go/tools/cmd/gosimple
 
 simple: $(GOPATH)/bin/gosimple
-	$(GOPATH)/bin/gosimple $(PKGS)
+	$(GOPATH)/bin/gosimple $(GOVET_PKGS)
 
 errcheck:
 	go get -v github.com/kisielk/errcheck
-	errcheck -verbose -blank -tags "$(TAGS) unittest integrationtest" $(PKGS)
+	errcheck -verbose -blank -tags "$(TAGS) unittest integrationtest" $(GOVET_PKGS)
 
 pretest: lint vet errcheck simple
 
