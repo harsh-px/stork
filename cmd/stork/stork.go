@@ -236,7 +236,7 @@ func runStork(d volume.Driver, c *cli.Context) {
 	ctx := crd.Context{
 		Clientset:             kubeClient,
 		APIExtensionClientset: apiExtClientset,
-		Interval:              500 * time.Millisecond, // TODO make these times constants
+		Interval:              500 * time.Millisecond,
 		Timeout:               60 * time.Second,
 	}
 	resources := []crd.CustomResource{

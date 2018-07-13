@@ -20,10 +20,10 @@ import (
 var snapRuleFailRegex = regexp.MustCompile("^snapshot failed due to err.+failed to run (pre|post)-snap rule.+")
 
 func testSnapshot(t *testing.T) {
-	//t.Run("simpleSnapshotTest", simpleSnapshotTest)
-	//t.Run("groupSnapshotTest", groupSnapshotTest)
-	//t.Run("cloudSnapshotTest", cloudSnapshotTest)
-	//t.Run("snapshotScaleTest", snapshotScaleTest)
+	t.Run("simpleSnapshotTest", simpleSnapshotTest)
+	t.Run("groupSnapshotTest", groupSnapshotTest)
+	t.Run("cloudSnapshotTest", cloudSnapshotTest)
+	t.Run("snapshotScaleTest", snapshotScaleTest)
 	t.Run("snapshot3DTest", snapshot3DTest)
 }
 

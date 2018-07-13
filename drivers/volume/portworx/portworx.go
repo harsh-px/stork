@@ -89,7 +89,7 @@ const (
 	cloudSnapshotSteps        = math.MaxInt32
 
 	// constants
-	cmdExecutorImage         = "harshpx/cmdexecutor:latest" // TODO change to offocial image
+	cmdExecutorImage         = "openstorage/cmdexecutor:latest"
 	storkServiceAccount      = "stork-account"
 	perPodCommandExecTimeout = 900 // 15 minutes
 

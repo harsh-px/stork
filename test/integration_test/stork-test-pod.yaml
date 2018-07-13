@@ -43,7 +43,7 @@ spec:
     - -test.v
     - -snapshot-scale-count=10
     imagePullPolicy: Always
-    image: harshpx/stork_test:latest
+    image: openstorage/stork_test:latest
     securityContext:
       privileged: false
     volumeMounts: []

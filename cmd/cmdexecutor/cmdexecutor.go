@@ -153,11 +153,6 @@ Loop:
 			}
 		}
 	}
-
-	/*if len(failedPods) > 0 {
-		logrus.Fatalf("pod executor failed as following commands failed. %v", failedPods)
-	}*/
-
 }
 
 func persistStatus(status string) error {
