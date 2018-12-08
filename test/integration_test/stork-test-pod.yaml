@@ -41,18 +41,18 @@ spec:
   - command: ["/stork.test"]
     args:
     - -test.v
-    - -snapshot-scale-count=10
+    - -snapshot-scale-count=1
     imagePullPolicy: Always
-    image: openstorage/stork_test:latest
+    image: harshpx/stork_test:latest
     securityContext:
       privileged: false
     volumeMounts: []
     name: stork
     env:
     - name: TORPEDO_SSH_USER
-      value: username
+      value: root
     - name: TORPEDO_SSH_PASSWORD
-      value: password
+      value: Password1
   hostNetwork: false
   hostPID: false
   volumes: []
