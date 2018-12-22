@@ -9,7 +9,7 @@ import (
 	stork_crd "github.com/libopenstorage/stork/pkg/apis/stork/v1alpha1"
 	"github.com/libopenstorage/stork/pkg/errors"
 	"github.com/sirupsen/logrus"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
@@ -55,10 +55,22 @@ type Driver interface {
 	// Stop the driver
 	Stop() error
 
+	// GroupSnapshotPluginInterface Interface for group snapshots
+	GroupSnapshotPluginInterface
 	// ClusterPairPluginInterface Interface to pair clusters
 	ClusterPairPluginInterface
 	// MigratePluginInterface Interface to migrate data between clusters
 	MigratePluginInterface
+}
+
+// GroupSnapshotPluginInterface is used to perform group snapshot operations
+type GroupSnapshotPluginInterface interface {
+	// CreateGroupSnapshot creates a group snapshot with the given pvcs
+	CreateGroupSnapshot(snap *stork_crd.GroupVolumeSnapshot) ([]*snapv1.VolumeSnapshot, error)
+	// GetGroupSnapshotStatus returns status of group snapshot
+	GetGroupSnapshotStatus(snap *stork_crd.GroupVolumeSnapshot) ([]*snapv1.VolumeSnapshot, error)
+	// DeleteGroupSnapshot delete a group snapshot with the given spec
+	DeleteGroupSnapshot(snap *stork_crd.GroupVolumeSnapshot) error
 }
 
 // ClusterPairPluginInterface Interface to pair clusters
@@ -193,6 +205,24 @@ func (m *MigrationNotSupported) UpdateMigratedPersistentVolumeSpec(
 	runtime.Unstructured,
 ) (runtime.Unstructured, error) {
 	return nil, &errors.ErrNotSupported{}
+}
+
+// GroupSnapshotNotSupported to be used by drivers that don't support group snapshots
+type GroupSnapshotNotSupported struct{}
+
+// CreateGroupSnapshot returns ErrNotSupported
+func (g *GroupSnapshotNotSupported) CreateGroupSnapshot(*stork_crd.GroupVolumeSnapshot) ([]*snapv1.VolumeSnapshot, error) {
+	return nil, &errors.ErrNotSupported{}
+}
+
+// GetGroupSnapshotStatus returns ErrNotSupported
+func (g *GroupSnapshotNotSupported) GetGroupSnapshotStatus(*stork_crd.GroupVolumeSnapshot) ([]*snapv1.VolumeSnapshot, error) {
+	return nil, &errors.ErrNotSupported{}
+}
+
+// DeleteGroupSnapshot returns ErrNotSupported
+func (g *GroupSnapshotNotSupported) DeleteGroupSnapshot(*stork_crd.GroupVolumeSnapshot) error {
+	return &errors.ErrNotSupported{}
 }
 
 // IsNodeMatch There are a couple of things that need to be checked to see if the driver

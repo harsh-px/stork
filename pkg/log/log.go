@@ -7,7 +7,7 @@ import (
 	appv1 "k8s.io/api/apps/v1"
 	appv1beta1 "k8s.io/api/apps/v1beta1"
 	appv1beta2 "k8s.io/api/apps/v1beta2"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 )
@@ -159,5 +159,19 @@ func MigrationLog(migration *storkv1.Migration) *logrus.Entry {
 
 	return logrus.WithFields(logrus.Fields{
 		"Migration": migration,
+	})
+}
+
+// GroupSnapshotLog formats a log message with groupsnapshot information
+func GroupSnapshotLog(groupsnapshot *storkv1.GroupVolumeSnapshot) *logrus.Entry {
+	if groupsnapshot != nil {
+		return logrus.WithFields(logrus.Fields{
+			"GroupSnapshotName":      groupsnapshot.Name,
+			"GroupSnapshotNamespace": groupsnapshot.Namespace,
+		})
+	}
+
+	return logrus.WithFields(logrus.Fields{
+		"GroupSnapshot": groupsnapshot,
 	})
 }

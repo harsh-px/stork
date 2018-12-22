@@ -85,6 +85,7 @@ func (c *controller) Handle(ctx context.Context, event sdk.Event) error {
 	var firstErr error
 	if handlers, ok := c.handlers[gkv]; ok {
 		for _, handler := range handlers {
+			logrus.Infof("[debug] calling handle for: %v", handler)
 			err := handler.Handle(ctx, event)
 			// Keep track of the first error
 			if err != nil && firstErr == nil {

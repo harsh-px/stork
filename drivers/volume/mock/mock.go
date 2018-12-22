@@ -10,7 +10,7 @@ import (
 	storkvolume "github.com/libopenstorage/stork/drivers/volume"
 	"github.com/libopenstorage/stork/pkg/errors"
 	"github.com/sirupsen/logrus"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	k8shelper "k8s.io/kubernetes/pkg/apis/core/v1/helper"
 )
 
@@ -30,6 +30,7 @@ const (
 type Driver struct {
 	storkvolume.ClusterPairNotSupported
 	storkvolume.MigrationNotSupported
+	storkvolume.GroupSnapshotNotSupported
 	nodes          []*storkvolume.NodeInfo
 	volumes        map[string]*storkvolume.Info
 	pvcs           map[string]*v1.PersistentVolumeClaim

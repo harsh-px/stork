@@ -10,6 +10,7 @@ import (
 	_ "github.com/libopenstorage/stork/drivers/volume/portworx"
 	"github.com/libopenstorage/stork/pkg/controller"
 	"github.com/libopenstorage/stork/pkg/extender"
+	"github.com/libopenstorage/stork/pkg/groupsnapshot"
 	"github.com/libopenstorage/stork/pkg/initializer"
 	"github.com/libopenstorage/stork/pkg/migration"
 	"github.com/libopenstorage/stork/pkg/monitor"
@@ -98,6 +99,10 @@ func main() {
 		cli.BoolTFlag{
 			Name:  "migration-controller",
 			Usage: "Start the migration controller (default: true)",
+		},
+		cli.BoolTFlag{
+			Name:  "groupsnapshot-controller",
+			Usage: "Start the groupsnapshot controller (default: true)",
 		},
 		cli.BoolFlag{
 			Name:  "app-initializer",
@@ -261,6 +266,16 @@ func runStork(d volume.Driver, recorder record.EventRecorder, c *cli.Context) {
 		}
 		if err := migration.Init(migrationAdminNamespace); err != nil {
 			log.Fatalf("Error initializing migration: %v", err)
+		}
+	}
+
+	if c.Bool("groupsnapshot-controller") {
+		groupsnapshotInst := groupsnapshot.GroupSnapshot{
+			Driver:   d,
+			Recorder: recorder,
+		}
+		if err := groupsnapshotInst.Init(); err != nil {
+			log.Fatalf("Error initializing groupsnapshot controller due to: %v", err)
 		}
 	}
 

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	version "github.com/hashicorp/go-version"
 	"github.com/heptio/ark/pkg/util/collections"
 	crdv1 "github.com/kubernetes-incubator/external-storage/snapshot/pkg/apis/crd/v1"
 	crdclient "github.com/kubernetes-incubator/external-storage/snapshot/pkg/client"
@@ -23,11 +24,12 @@ import (
 	storkvolume "github.com/libopenstorage/stork/drivers/volume"
 	stork_crd "github.com/libopenstorage/stork/pkg/apis/stork/v1alpha1"
 	"github.com/libopenstorage/stork/pkg/errors"
+	"github.com/libopenstorage/stork/pkg/k8sutils"
 	"github.com/libopenstorage/stork/pkg/log"
 	snapshot "github.com/libopenstorage/stork/pkg/snapshot"
 	"github.com/portworx/sched-ops/k8s"
 	"github.com/sirupsen/logrus"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -79,11 +81,11 @@ const (
 	readySnapshotMsg       = "Snapshot created successfully and it is ready"
 	// volumeSnapshot* is configuration of exponential backoff for
 	// waiting for snapshot operation to complete. Starting with 2
-	// seconds, multiplying by 1.5 with each step and taking 20 steps at maximum.
-	// It will time out after 20 steps (6650 seconds).
+	// seconds, multiplying by 1.0 with each step and taking 120 steps at maximum.
+	// It will time out after 300 seconds.
 	volumeSnapshotInitialDelay = 2 * time.Second
-	volumeSnapshotFactor       = 1.5
-	volumeSnapshotSteps        = 20
+	volumeSnapshotFactor       = 1
+	volumeSnapshotSteps        = 150
 
 	// for cloud snaps, we use 5 * maxint32 seconds as timeout since we cannot
 	// accurately predict a correct timeout
@@ -96,9 +98,11 @@ const (
 )
 
 type cloudSnapStatus struct {
-	status      api.CloudBackupStatusType
-	msg         string
-	cloudSnapID string
+	sourceVolumeID string
+	terminal       bool
+	status         api.CloudBackupStatusType
+	msg            string
+	cloudSnapID    string
 }
 
 // snapshot annotation constants
@@ -109,6 +113,7 @@ const (
 	pxAnnotationKeyPrefix         = "portworx/"
 	pxSnapshotTypeKey             = pxAnnotationKeyPrefix + "snapshot-type"
 	pxCloudSnapshotCredsIDKey     = pxAnnotationKeyPrefix + "cloud-cred-id"
+	pxCloudSnapshotTaskIDKey      = pxAnnotationKeyPrefix + "cloudsnap-task-id"
 )
 
 var pxGroupSnapSelectorRegex = regexp.MustCompile(`^portworx\.selector/(.+)`)
@@ -242,6 +247,10 @@ func (p *portworx) InspectVolume(volumeID string) (*storkvolume.Info, error) {
 	}
 
 	for k, v := range vols[0].Spec.GetVolumeLabels() {
+		info.Labels[k] = v
+	}
+
+	for k, v := range vols[0].Locator.GetVolumeLabels() {
 		info.Labels[k] = v
 	}
 
@@ -427,6 +436,7 @@ func (p *portworx) SnapshotCreate(
 	pv *v1.PersistentVolume,
 	tags *map[string]string,
 ) (*crdv1.VolumeSnapshotDataSource, *[]crdv1.VolumeSnapshotCondition, error) {
+	logrus.Infof("[debug] legacy snapshot create for snap: [%s] %s", snap.Metadata.Namespace, snap.Metadata.Name)
 	var err error
 	if pv == nil || pv.Spec.PortworxVolume == nil {
 		err = fmt.Errorf("invalid PV: %v", pv)
@@ -462,7 +472,7 @@ func (p *portworx) SnapshotCreate(
 	spec := &pv.Spec
 	volumeID := spec.PortworxVolume.VolumeID
 
-	snapType, err := getSnapshotType(snap)
+	snapType, err := getSnapshotType(snap.Metadata.Annotations)
 	if err != nil {
 		return nil, getErrorSnapshotConditions(err), err
 	}
@@ -470,7 +480,7 @@ func (p *portworx) SnapshotCreate(
 	switch snapType {
 	case crdv1.PortworxSnapshotTypeCloud:
 		log.SnapshotLog(snap).Debugf("Cloud SnapshotCreate for pv: %+v \n tags: %v", pv, tags)
-		ok, msg, err := p.ensureNodesDontMatchVersionPrefix(pre2VersionRegex)
+		ok, msg, err := p.ensureNodesHaveMinVersion("2.0")
 		if err != nil {
 			return nil, nil, err
 		}
@@ -508,7 +518,7 @@ func (p *portworx) SnapshotCreate(
 		snapStatusConditions = getReadySnapshotConditions()
 	case crdv1.PortworxSnapshotTypeLocal:
 		if isGroupSnap(snap) {
-			ok, msg, err := p.ensureNodesDontMatchVersionPrefix(pre14VersionRegex)
+			ok, msg, err := p.ensureNodesHaveMinVersion("2.0.2")
 			if err != nil {
 				return nil, nil, err
 			}
@@ -516,7 +526,7 @@ func (p *portworx) SnapshotCreate(
 			if !ok {
 				err = &errors.ErrNotSupported{
 					Feature: "Group snapshots",
-					Reason:  "Only supported on PX version 1.4 onwards: " + msg,
+					Reason:  "Only supported on PX version 2.0.2 onwards: " + msg,
 				}
 
 				return nil, getErrorSnapshotConditions(err), err
@@ -530,71 +540,49 @@ func (p *portworx) SnapshotCreate(
 				return nil, getErrorSnapshotConditions(err), err
 			}
 
+			volNames := make([]string, 0)
 			infoStr := fmt.Sprintf("Creating group snapshot: [%s] %s", snap.Metadata.Namespace, snap.Metadata.Name)
 			if len(groupID) > 0 {
 				infoStr = fmt.Sprintf("%s. Group ID: %s", infoStr, groupID)
+				groupIDVolNames, err := getVolumeNamesFromLabelSelector(snap.Metadata.Namespace, groupLabels)
+				if err != nil {
+					return nil, getErrorSnapshotConditions(err), err
+				}
+
+				if len(groupIDVolNames) > 0 {
+					volNames = append(volNames, groupIDVolNames...)
+				}
 			}
 
 			if len(groupLabels) > 0 {
 				infoStr = fmt.Sprintf("%s. Group labels: %v", infoStr, groupLabels)
+				labelVolNames, err := getVolumeNamesFromLabelSelector(snap.Metadata.Namespace, groupLabels)
+				if err != nil {
+					return nil, getErrorSnapshotConditions(err), err
+				}
+
+				if len(labelVolNames) > 0 {
+					volNames = append(volNames, labelVolNames...)
+				}
 			}
 
 			logrus.Infof(infoStr)
 
-			resp, err := p.volDriver.SnapshotGroup(groupID, groupLabels)
+			logrus.Infof("[debug] volnames for group snap: %v", volNames)
+			snapObjs, snapDataObjs, err := p.createGroupLocalSnapFromPVCs(snap, volNames, nil)
 			if err != nil {
 				return nil, getErrorSnapshotConditions(err), err
 			}
 
-			if len(resp.Snapshots) == 0 {
-				err = fmt.Errorf("found 0 snapshots using given group selector/ID. resp: %v", resp)
-				return nil, getErrorSnapshotConditions(err), err
-			}
-
 			snapDataNames := make([]string, 0)
-			failedSnapVols := make([]string, 0)
 			snapIDs := make([]string, 0)
 
-			// Loop through the response and check if all succeeded. Don't create any k8s objects if
-			// any of the snapshots failed
-			for volID, newSnapResp := range resp.Snapshots {
-				if newSnapResp.GetVolumeCreateResponse() == nil {
-					err = fmt.Errorf("Portworx API returned empty response on creation of group snapshot")
-					return nil, getErrorSnapshotConditions(err), err
-				}
-
-				if newSnapResp.GetVolumeCreateResponse().GetVolumeResponse() != nil &&
-					len(newSnapResp.GetVolumeCreateResponse().GetVolumeResponse().GetError()) != 0 {
-					log.SnapshotLog(snap).Errorf("failed to create snapshot for volume: %s due to: %v",
-						volID, newSnapResp.GetVolumeCreateResponse().GetVolumeResponse().GetError())
-					failedSnapVols = append(failedSnapVols, volID)
-					continue
-				}
-
-				snapIDs = append(snapIDs, newSnapResp.GetVolumeCreateResponse().GetId())
-			}
-
-			if len(failedSnapVols) > 0 {
-				p.revertPXSnaps(snapIDs)
-
-				err = fmt.Errorf("all snapshots in the group did not succeed. failed: %v succeeded: %v", failedSnapVols, snapIDs)
-				return nil, getErrorSnapshotConditions(err), err
-			}
-
-			createdSnapObjs := make([]*crdv1.VolumeSnapshot, 0)
-			for _, newSnapResp := range resp.Snapshots {
-				newSnapID := newSnapResp.GetVolumeCreateResponse().GetId()
-				snapObj, err := p.createVolumeSnapshotCRD(newSnapID, newSnapResp, groupID, groupLabels, snap)
-				if err != nil {
-					p.revertPXSnaps(snapIDs)
-					p.revertSnapObjs(createdSnapObjs)
-
-					err = fmt.Errorf("failed to create VolumeSnapshot object for PX snapshot: %s due to: %v", newSnapID, err)
-					return nil, getErrorSnapshotConditions(err), err
-				}
-
-				createdSnapObjs = append(createdSnapObjs, snapObj)
+			for _, snapObj := range snapObjs {
 				snapDataNames = append(snapDataNames, snapObj.Spec.SnapshotDataName)
+			}
+
+			for _, snapDataObj := range snapDataObjs {
+				snapIDs = append(snapIDs, snapDataObj.Spec.VolumeSnapshotDataSource.PortworxSnapshot.SnapshotID)
 			}
 
 			snapshotID = strings.Join(snapIDs, ",")
@@ -640,8 +628,11 @@ func (p *portworx) SnapshotDelete(snapDataSrc *crdv1.VolumeSnapshotDataSource, _
 		return fmt.Errorf("Invalid snapshot source %v", snapDataSrc)
 	}
 
+	logrus.Infof("[debug] Legacy driver got delete")
+
 	switch snapDataSrc.PortworxSnapshot.SnapshotType {
 	case crdv1.PortworxSnapshotTypeCloud:
+		logrus.Infof("[debug] Legacy driver got delete for cloud")
 		input := &api.CloudBackupDeleteRequest{
 			ID:             snapDataSrc.PortworxSnapshot.SnapshotID,
 			CredentialUUID: snapDataSrc.PortworxSnapshot.SnapshotCloudCredID,
@@ -680,7 +671,7 @@ func (p *portworx) SnapshotDelete(snapDataSrc *crdv1.VolumeSnapshotDataSource, _
 					})
 					if err != nil {
 						lastError = err
-						logrus.Errorf("Failed to get volume snapshot: [%s] %s due to err: %v", snapNamespace, snapName, err)
+						logrus.Errorf("Failed to delete volume snapshot: [%s] %s due to err: %v", snapNamespace, snapName, err)
 						continue
 					}
 				}
@@ -837,7 +828,7 @@ func (p *portworx) DescribeSnapshot(snapshotData *crdv1.VolumeSnapshotData) (*[]
 			return getErrorSnapshotConditions(err), false, err
 		}
 
-		csStatus := p.checkCloudSnapStatus(api.CloudBackupOp, pv.Spec.PortworxVolume.VolumeID)
+		csStatus := p.getCloudSnapStatus(api.CloudBackupOp, pv.Spec.PortworxVolume.VolumeID)
 		if csStatus.status == api.CloudBackupStatusFailed {
 			err = fmt.Errorf(csStatus.msg)
 			return getErrorSnapshotConditions(err), false, err
@@ -860,7 +851,7 @@ func (p *portworx) FindSnapshot(tags *map[string]string) (*crdv1.VolumeSnapshotD
 
 func (p *portworx) GetSnapshotType(snap *crdv1.VolumeSnapshot) (string, error) {
 	// TODO: Check if is a portworx snapshot
-	snapType, err := getSnapshotType(snap)
+	snapType, err := getSnapshotType(snap.Metadata.Annotations)
 	if err != nil {
 		return "", err
 	}
@@ -877,19 +868,26 @@ func (p *portworx) VolumeDelete(pv *v1.PersistentVolume) error {
 	return p.volDriver.Delete(pv.Spec.PortworxVolume.VolumeID)
 }
 
-func (p *portworx) createVolumeSnapshotCRD(
-	pxSnapID string,
-	newSnapResp *api.SnapCreateResponse,
-	groupID string,
-	groupLabels map[string]string,
-	groupSnap *crdv1.VolumeSnapshot) (*crdv1.VolumeSnapshot, error) {
-	parentPVCOrVolID, err := p.findParentPVCOrVolID(pxSnapID)
+func (p *portworx) getVolumeSnapshotAndDataObjects(
+	pxSnapID, parentPVCOrVolID string,
+	parentGroupSnapObject runtime.Object,
+	done, triggered bool,
+	statusMsg string) (*crdv1.VolumeSnapshot, *crdv1.VolumeSnapshotData, error) {
+	logrus.Infof("[debug] done: %v triggered: %v", done, triggered)
+
+	parentMetadata, err := meta.Accessor(parentGroupSnapObject)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	namespace := groupSnap.Metadata.Namespace
-	volumeSnapshotName := fmt.Sprintf("%s-%s-%s", groupSnap.Metadata.Name, parentPVCOrVolID, groupSnap.GetObjectMeta().GetUID())
+	parentName := parentMetadata.GetName()
+	parentNamespace := parentMetadata.GetNamespace()
+	if len(parentNamespace) == 0 {
+		parentNamespace = metav1.NamespaceDefault
+	}
+	parentUUID := parentMetadata.GetUID()
+
+	volumeSnapshotName := fmt.Sprintf("%s-%s-%s", parentName, parentPVCOrVolID, parentUUID)
 	snapDataSource := &crdv1.VolumeSnapshotDataSource{
 		PortworxSnapshot: &crdv1.PortworxVolumeSnapshotSource{
 			SnapshotID:   pxSnapID,
@@ -897,29 +895,36 @@ func (p *portworx) createVolumeSnapshotCRD(
 		},
 	}
 
-	snapStatus := getReadySnapshotConditions()
-
-	snapLabels := make(map[string]string)
-	if len(groupID) > 0 {
-		snapLabels[pxSnapshotGroupIDKey] = groupID
+	var snapStatus []crdv1.VolumeSnapshotCondition
+	if done {
+		snapStatus = getReadySnapshotConditions()
+	} else if triggered {
+		snapStatus = getPendingSnapshotConditions(statusMsg)
 	}
 
-	for k, v := range groupLabels {
-		snapLabels[k] = v
-	}
+	logrus.Infof("[debug] adding conditions: %v for snapshot", snapStatus)
 
-	snapData, err := p.createVolumeSnapshotData(volumeSnapshotName, namespace, snapDataSource, &snapStatus, snapLabels)
+	snapLabels := parentMetadata.GetLabels()
+
+	snapData, err := p.getVolumeSnapshotDataObj(volumeSnapshotName, parentNamespace, snapDataSource, &snapStatus, snapLabels)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-
-	snapDataSource.PortworxSnapshot.SnapshotData = snapData.Metadata.Name
 
 	snap := &crdv1.VolumeSnapshot{
 		Metadata: metav1.ObjectMeta{
-			Name:      volumeSnapshotName,
-			Namespace: namespace,
-			Labels:    snapLabels,
+			Name:        volumeSnapshotName,
+			Namespace:   parentNamespace,
+			Labels:      snapLabels,
+			Annotations: make(map[string]string),
+			OwnerReferences: []metav1.OwnerReference{
+				metav1.OwnerReference{
+					Name:       parentName,
+					UID:        parentUUID,
+					Kind:       parentGroupSnapObject.GetObjectKind().GroupVersionKind().Kind,
+					APIVersion: parentGroupSnapObject.GetObjectKind().GroupVersionKind().GroupVersion().String(),
+				},
+			},
 		},
 		Spec: crdv1.VolumeSnapshotSpec{
 			SnapshotDataName: snapData.Metadata.Name,
@@ -931,38 +936,10 @@ func (p *portworx) createVolumeSnapshotCRD(
 		},
 	}
 
-	log.SnapshotLog(snap).Infof("Creating VolumeSnapshot object")
-	err = wait.ExponentialBackoff(snapAPICallBackoff, func() (bool, error) {
-		_, err := k8s.Instance().CreateSnapshot(snap)
-		if err != nil {
-			log.SnapshotLog(snap).Errorf("failed to create volumesnapshot due to err: %v", err)
-			return false, nil
-		}
-
-		return true, nil
-	})
-	if err != nil {
-		// revert snapdata
-		deleteErr := wait.ExponentialBackoff(snapAPICallBackoff, func() (bool, error) {
-			deleteErr := k8s.Instance().DeleteSnapshotData(snapData.Metadata.Name)
-			if err != nil {
-				log.SnapshotLog(snap).Errorf("failed to delete volumesnapshotdata due to err: %v", deleteErr)
-				return false, nil
-			}
-
-			return true, nil
-		})
-		if deleteErr != nil {
-			log.SnapshotLog(snap).Errorf("failed to revert volumesnapshotdata due to: %v", deleteErr)
-		}
-
-		return nil, err
-	}
-
-	return snap, nil
+	return snap, snapData, nil
 }
 
-func (p *portworx) createVolumeSnapshotData(
+func (p *portworx) getVolumeSnapshotDataObj(
 	snapshotName, snapshotNamespace string,
 	snapDataSource *crdv1.VolumeSnapshotDataSource,
 	snapStatus *[]crdv1.VolumeSnapshotCondition,
@@ -1001,25 +978,7 @@ func (p *portworx) createVolumeSnapshotData(
 		},
 	}
 
-	var result *crdv1.VolumeSnapshotData
-	err := wait.ExponentialBackoff(snapAPICallBackoff, func() (bool, error) {
-		var err error
-		result, err = k8s.Instance().CreateSnapshotData(snapshotData)
-		if err != nil {
-			logrus.Errorf("failed to create snapshotdata due to err: %v", err)
-			return false, nil
-		}
-
-		return true, nil
-	})
-
-	if err != nil {
-		err = fmt.Errorf("error creating the VolumeSnapshotData for snap %s due to err: %v", snapshotName, err)
-		logrus.Println(err)
-		return nil, err
-	}
-
-	return result, nil
+	return snapshotData, nil
 }
 
 // findParentPVCOrVolID is a best effort routine that attempts to find parent PVC name for
@@ -1034,24 +993,29 @@ func (p *portworx) findParentPVCOrVolID(snapID string) (string, error) {
 		return "", fmt.Errorf("Portworx snapshot: %s does not have parent set", snapID)
 	}
 
-	snapParentInfo, err := p.InspectVolume(snapInfo.ParentID)
+	return p.getPVCNameFromVolumeID(snapInfo.ParentID)
+}
+
+func (p *portworx) getPVCNameFromVolumeID(volID string) (string, error) {
+	snapParentInfo, err := p.InspectVolume(volID)
 	if err != nil {
-		logrus.Warnf("Parent volume: %s for snapshot: %s is not found due to: %v", snapInfo.ParentID, snapID, err)
-		return snapInfo.ParentID, nil
+		logrus.Warnf("volume: %s not found due to: %v", volID, err)
+		return volID, nil
 	}
 
 	parentPV, err := k8s.Instance().GetPersistentVolume(snapParentInfo.VolumeName)
 	if err != nil {
-		logrus.Warnf("Parent PV: %s of snapshot: %s is not found due to: %v", snapParentInfo.VolumeName, snapID, err)
-		return snapInfo.ParentID, nil
+		logrus.Warnf("Parent PV: %s not found due to: %v", snapParentInfo.VolumeName, err)
+		return volID, nil
 	}
 
 	pvc, err := k8s.Instance().GetPersistentVolumeClaim(parentPV.Spec.ClaimRef.Name, parentPV.Spec.ClaimRef.Namespace)
 	if err != nil {
-		return snapInfo.ParentID, nil
+		return volID, nil
 	}
 
 	return pvc.GetName(), nil
+
 }
 
 func (p *portworx) waitForCloudSnapCompletion(
@@ -1066,57 +1030,51 @@ func (p *portworx) waitForCloudSnapCompletion(
 	}
 
 	err := wait.ExponentialBackoff(cloudsnapBackoff, func() (bool, error) {
-		csStatus = p.checkCloudSnapStatus(op, taskID)
-		switch csStatus.status {
-		case api.CloudBackupStatusFailed:
+		csStatus = p.getCloudSnapStatus(op, taskID)
+		if verbose {
+			logrus.Infof(csStatus.msg)
+		}
+
+		if csStatus.status == api.CloudBackupStatusFailed {
 			err := fmt.Errorf("Cloudsnap %s of %s failed due to: %s", op, taskID, csStatus.msg)
 			logrus.Errorf(err.Error())
-			return true, err
-		case api.CloudBackupStatusDone:
-			if verbose {
-				logrus.Infof(csStatus.msg)
-			}
-			return true, nil
-		case api.CloudBackupStatusActive:
-			if verbose {
-				logrus.Infof(csStatus.msg)
-			}
-
+			return csStatus.terminal, err
+		} else if csStatus.status == api.CloudBackupStatusActive {
 			if backgroundCommandTermChan != nil {
 				// since cloudsnap is already triggered and active, send signal to terminate background jobs
 				backgroundCommandTermChan <- true
 			}
-			return false, nil
-		case api.CloudBackupStatusNotStarted:
-			if verbose {
-				logrus.Infof(csStatus.msg)
-			}
-			return false, nil
-		default:
-			err := fmt.Errorf("received unexpected status for cloudsnap %s of %s. status: %s", op, taskID, csStatus.status)
-			return false, err
+
+			return csStatus.terminal, nil
+		} else {
+			return csStatus.terminal, nil
 		}
 	})
 
 	return csStatus, err
 }
 
-func (p *portworx) checkCloudSnapStatus(op api.CloudBackupOpType, taskID string) cloudSnapStatus {
+func (p *portworx) getCloudSnapStatus(op api.CloudBackupOpType, taskID string) cloudSnapStatus {
+	logrus.Infof("[debug] checking cloudsnap status using: %s", taskID)
 	response, err := p.volDriver.CloudBackupStatus(&api.CloudBackupStatusRequest{
 		Name: taskID,
 	})
 	if err != nil {
+		logrus.Infof("[debug] no status response using: %s", taskID)
 		return cloudSnapStatus{
-			status: api.CloudBackupStatusFailed,
-			msg:    err.Error(),
+			terminal: true,
+			status:   api.CloudBackupStatusFailed,
+			msg:      err.Error(),
 		}
 	}
 
 	csStatus, present := response.Statuses[taskID]
 	if !present {
+		logrus.Infof("[debug] status not present using: %s", taskID)
 		return cloudSnapStatus{
-			status: api.CloudBackupStatusFailed,
-			msg:    fmt.Sprintf("failed to get cloudsnap status for task %s", taskID),
+			terminal: true,
+			status:   api.CloudBackupStatusFailed,
+			msg:      fmt.Sprintf("failed to get cloudsnap status for task %s", taskID),
 		}
 	}
 
@@ -1124,8 +1082,10 @@ func (p *portworx) checkCloudSnapStatus(op api.CloudBackupOpType, taskID string)
 
 	if csStatus.Status == api.CloudBackupStatusFailed {
 		return cloudSnapStatus{
-			status:      api.CloudBackupStatusFailed,
-			cloudSnapID: csStatus.ID,
+			sourceVolumeID: csStatus.SrcVolumeID,
+			terminal:       true,
+			status:         api.CloudBackupStatusFailed,
+			cloudSnapID:    csStatus.ID,
 			msg: fmt.Sprintf("cloudsnap %s id: %s for %s failed.",
 				op, csStatus.ID, taskID),
 		}
@@ -1133,8 +1093,9 @@ func (p *portworx) checkCloudSnapStatus(op api.CloudBackupOpType, taskID string)
 
 	if csStatus.Status == api.CloudBackupStatusActive {
 		return cloudSnapStatus{
-			status:      api.CloudBackupStatusActive,
-			cloudSnapID: csStatus.ID,
+			sourceVolumeID: csStatus.SrcVolumeID,
+			status:         api.CloudBackupStatusActive,
+			cloudSnapID:    csStatus.ID,
 			msg: fmt.Sprintf("cloudsnap %s id: %s for %s has started and is active.",
 				op, csStatus.ID, taskID),
 		}
@@ -1142,17 +1103,20 @@ func (p *portworx) checkCloudSnapStatus(op api.CloudBackupOpType, taskID string)
 
 	if csStatus.Status != api.CloudBackupStatusDone {
 		return cloudSnapStatus{
-			status:      api.CloudBackupStatusNotStarted,
-			cloudSnapID: csStatus.ID,
+			sourceVolumeID: csStatus.SrcVolumeID,
+			status:         api.CloudBackupStatusNotStarted,
+			cloudSnapID:    csStatus.ID,
 			msg: fmt.Sprintf("cloudsnap %s id: %s for %s still not done. status: %s",
 				op, csStatus.ID, taskID, statusStr),
 		}
 	}
 
 	return cloudSnapStatus{
-		status:      api.CloudBackupStatusDone,
-		cloudSnapID: csStatus.ID,
-		msg:         fmt.Sprintf("cloudsnap %s id: %s for %s done.", op, csStatus.ID, taskID),
+		sourceVolumeID: csStatus.SrcVolumeID,
+		terminal:       true,
+		status:         api.CloudBackupStatusDone,
+		cloudSnapID:    csStatus.ID,
+		msg:            fmt.Sprintf("cloudsnap %s id: %s for %s done.", op, csStatus.ID, taskID),
 	}
 }
 
@@ -1177,6 +1141,33 @@ func (p *portworx) revertPXSnaps(snapIDs []string) {
 	}
 
 	logrus.Infof("Successfully reverted PX snapshots")
+}
+
+func (p *portworx) revertPXCloudSnaps(cloudSnapIDs []string) {
+	failedDeletions := make(map[string]error)
+	for _, cloudSnapID := range cloudSnapIDs {
+		input := &api.CloudBackupDeleteRequest{
+			ID: cloudSnapID,
+			// TODO supports only one cred UUID for now
+			//CredentialUUID: snapDataSrc.PortworxSnapshot.SnapshotCloudCredID,
+		}
+		err := p.volDriver.CloudBackupDelete(input)
+		if err != nil {
+			failedDeletions[cloudSnapID] = err
+		}
+	}
+
+	if len(failedDeletions) > 0 {
+		errString := ""
+		for failedID, failedErr := range failedDeletions {
+			errString = fmt.Sprintf("%s delete of %s failed due to err: %v.\n", errString, failedID, failedErr)
+		}
+
+		err := fmt.Errorf("failed to revert created PX snapshots. err: %s", errString)
+		logrus.Errorf(err.Error())
+	} else {
+		logrus.Infof("Successfully reverted PX cloudsnap snapshots")
+	}
 }
 
 func (p *portworx) revertSnapObjs(snapObjs []*crdv1.VolumeSnapshot) {
@@ -1248,16 +1239,37 @@ func (p *portworx) validatePVForGroupSnap(pvName, groupID string, groupLabels ma
 	return nil
 }
 
-func (p *portworx) ensureNodesDontMatchVersionPrefix(versionRegex *regexp.Regexp) (bool, string, error) {
+func (p *portworx) areNodesRunningVersionGreaterThan(version string) (bool, error) {
+	return false, nil
+}
+
+// ensureNodesHaveMinVersion ensures that all PX nodes are atleast running the given minVersionStr
+func (p *portworx) ensureNodesHaveMinVersion(minVersionStr string) (bool, string, error) {
+	minVersion, err := version.NewVersion(minVersionStr)
+	if err != nil {
+		return false, "", err
+	}
+
 	result, err := p.clusterManager.Enumerate()
 	if err != nil {
 		return false, "", err
 	}
 
+	pxVerRegex := regexp.MustCompile(`^(\d+\.\d+\.\d+).*`)
 	for _, node := range result.Nodes {
-		version := node.NodeLabels["PX Version"]
-		if versionRegex.MatchString(version) {
-			return false, fmt.Sprintf("node: %s has version: %s", node.Hostname, version), nil
+		nodeVersion := node.NodeLabels["PX Version"]
+		matches := pxVerRegex.FindStringSubmatch(nodeVersion)
+		if len(matches) < 2 {
+			return false, "", fmt.Errorf("failed to parse PX version: %s on node", nodeVersion)
+		}
+
+		currentVer, err := version.NewVersion(matches[1])
+		if err != nil {
+			return false, "", err
+		}
+
+		if currentVer.LessThan(minVersion) {
+			return false, fmt.Sprintf("node: %s has version: %s", node.Hostname, nodeVersion), nil
 		}
 	}
 
@@ -1266,7 +1278,7 @@ func (p *portworx) ensureNodesDontMatchVersionPrefix(versionRegex *regexp.Regexp
 
 func (p *portworx) getPVCsForSnapshot(snap *crdv1.VolumeSnapshot) ([]v1.PersistentVolumeClaim, error) {
 	var err error
-	snapType, err := getSnapshotType(snap)
+	snapType, err := getSnapshotType(snap.Metadata.Annotations)
 	if err != nil {
 		return nil, err
 	}
@@ -1365,9 +1377,9 @@ func (p *portworx) getPVCsForGroupID(namespace, groupID string) ([]v1.Persistent
 	return pvcsWithGroupID, nil
 }
 
-func getSnapshotType(snap *crdv1.VolumeSnapshot) (crdv1.PortworxSnapshotType, error) {
-	if snap.Metadata.Annotations != nil {
-		if val, snapTypePresent := snap.Metadata.Annotations[pxSnapshotTypeKey]; snapTypePresent {
+func getSnapshotType(options map[string]string) (crdv1.PortworxSnapshotType, error) {
+	if options != nil {
+		if val, snapTypePresent := options[pxSnapshotTypeKey]; snapTypePresent {
 			if crdv1.PortworxSnapshotType(val) == crdv1.PortworxSnapshotTypeLocal ||
 				crdv1.PortworxSnapshotType(val) == crdv1.PortworxSnapshotTypeCloud {
 				return crdv1.PortworxSnapshotType(val), nil
@@ -1471,7 +1483,7 @@ func getCloudSnapStatusString(status *api.CloudBackupStatus) string {
 }
 
 func (p *portworx) CreatePair(pair *stork_crd.ClusterPair) (string, error) {
-	ok, msg, err := p.ensureNodesDontMatchVersionPrefix(pre2VersionRegex)
+	ok, msg, err := p.ensureNodesHaveMinVersion("2.0")
 	if err != nil {
 		return "", err
 	}
@@ -1507,7 +1519,7 @@ func (p *portworx) DeletePair(pair *stork_crd.ClusterPair) error {
 }
 
 func (p *portworx) StartMigration(migration *stork_crd.Migration) ([]*stork_crd.VolumeInfo, error) {
-	ok, msg, err := p.ensureNodesDontMatchVersionPrefix(pre2VersionRegex)
+	ok, msg, err := p.ensureNodesHaveMinVersion("2.0")
 	if err != nil {
 		return nil, err
 	}
@@ -1583,7 +1595,8 @@ func (p *portworx) getMigrationTaskID(migration *stork_crd.Migration, volumeInfo
 }
 
 func (p *portworx) GetMigrationStatus(migration *stork_crd.Migration) ([]*stork_crd.VolumeInfo, error) {
-	status, err := p.volDriver.CloudMigrateStatus()
+	// TODO fix with dinesh
+	status, err := p.volDriver.CloudMigrateStatus(nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1664,6 +1677,393 @@ func (p *portworx) UpdateMigratedPersistentVolumeSpec(
 
 	portworxSpec["volumeID"] = metadata.GetName()
 	return object, nil
+}
+
+func getVolumeNamesFromLabelSelector(namespace string, labels map[string]string) ([]string, error) {
+	pvcs, err := k8sutils.GetPVCsForGroupSnapshot(namespace, labels)
+	if err != nil {
+		return nil, err
+	}
+
+	volNames := make([]string, 0)
+	for _, pvc := range pvcs {
+		volName, err := k8s.Instance().GetVolumeForPersistentVolumeClaim(&pvc)
+		if err != nil {
+			return nil, err
+		}
+
+		volNames = append(volNames, volName)
+	}
+
+	return volNames, nil
+}
+
+func (p *portworx) CreateGroupSnapshot(snap *stork_crd.GroupVolumeSnapshot) (
+	[]*crdv1.VolumeSnapshot, error) {
+	ok, msg, err := p.ensureNodesHaveMinVersion("2.0.2")
+	if err != nil {
+		return nil, err
+	}
+
+	if !ok {
+		err = &errors.ErrNotSupported{
+			Feature: "Group snapshots using CRD",
+			Reason:  "Only supported on PX version 2.0.2 onwards: " + msg,
+		}
+
+		return nil, err
+	}
+
+	volNames, err := getVolumeNamesFromLabelSelector(snap.Namespace, snap.Spec.PVCSelector.MatchLabels)
+	if err != nil {
+		return nil, err
+	}
+
+	snapType, err := getSnapshotType(snap.Spec.Options)
+	if err != nil {
+		return nil, err
+	}
+	switch snapType {
+	case crdv1.PortworxSnapshotTypeCloud:
+		return p.createGroupCloudSnapFromVolumes(snap, volNames, snap.Spec.Options)
+	case crdv1.PortworxSnapshotTypeLocal:
+		snapObjs, _, err := p.createGroupLocalSnapFromPVCs(snap, volNames, snap.Spec.Options)
+		return snapObjs, err
+	}
+
+	return nil, fmt.Errorf("unsupported snapshot type: %s", snapType)
+}
+
+func (p *portworx) createGroupLocalSnapFromPVCs(parentObject runtime.Object, volNames []string, options map[string]string) (
+	[]*crdv1.VolumeSnapshot, []*crdv1.VolumeSnapshotData, error) {
+
+	resp, err := p.volDriver.SnapshotGroup("", nil, volNames)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if len(resp.Snapshots) == 0 {
+		err = fmt.Errorf("found 0 snapshots using given group selector/ID. resp: %v", resp)
+		return nil, nil, err
+	}
+
+	failedSnapVols := make([]string, 0)
+	snapIDs := make([]string, 0)
+
+	// Loop through the response and check if all succeeded. Don't create any k8s objects if
+	// any of the snapshots failed
+	for volID, newSnapResp := range resp.Snapshots {
+		if newSnapResp.GetVolumeCreateResponse() == nil {
+			err = fmt.Errorf("Portworx API returned empty response on creation of group snapshot")
+			return nil, nil, err
+		}
+
+		if newSnapResp.GetVolumeCreateResponse().GetVolumeResponse() != nil &&
+			len(newSnapResp.GetVolumeCreateResponse().GetVolumeResponse().GetError()) != 0 {
+
+			logrus.Errorf("failed to create snapshot for volume: %s due to: %v",
+				volID, newSnapResp.GetVolumeCreateResponse().GetVolumeResponse().GetError())
+			failedSnapVols = append(failedSnapVols, volID)
+			continue
+		}
+
+		snapIDs = append(snapIDs, newSnapResp.GetVolumeCreateResponse().GetId())
+	}
+
+	if len(failedSnapVols) > 0 {
+		p.revertPXSnaps(snapIDs)
+
+		err = fmt.Errorf("all snapshots in the group did not succeed. failed: %v succeeded: %v", failedSnapVols, snapIDs)
+		return nil, nil, err
+	}
+
+	responseSnapObjs := make([]*crdv1.VolumeSnapshot, 0)
+	responseSnapDataObjs := make([]*crdv1.VolumeSnapshotData, 0)
+	for _, newSnapResp := range resp.Snapshots {
+		newSnapID := newSnapResp.GetVolumeCreateResponse().GetId()
+		parentPVCOrVolID, err := p.findParentPVCOrVolID(newSnapID)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		snapObj, snapDataObj, err := p.getVolumeSnapshotAndDataObjects(
+			newSnapID, parentPVCOrVolID, parentObject, true, true, "")
+		if err != nil {
+			return nil, nil, err
+		}
+
+		snapObj, snapDataObj, err = p.createSnapAndSnapData(snapObj, snapDataObj)
+		if err != nil {
+			p.revertPXSnaps(snapIDs)
+
+			err = fmt.Errorf("failed to create VolumeSnapshot object for PX snapshot: %s due to: %v", newSnapID, err)
+			return nil, nil, err
+		}
+
+		responseSnapObjs = append(responseSnapObjs, snapObj)
+		responseSnapDataObjs = append(responseSnapDataObjs, snapDataObj)
+	}
+
+	return responseSnapObjs, responseSnapDataObjs, nil
+}
+
+func (p *portworx) createGroupCloudSnapFromVolumes(parentObject runtime.Object, volNames []string, options map[string]string) (
+	[]*crdv1.VolumeSnapshot, error) {
+	resp, err := p.volDriver.CloudBackupGroupCreate(&api.CloudBackupGroupCreateRequest{
+		VolumeIDs: volNames})
+	if err != nil {
+		return nil, err
+	}
+
+	if len(resp.Names) == 0 {
+		return nil, fmt.Errorf("group cloudsnapshot request returned 0 tasks")
+	}
+
+	logrus.Infof("[debug] resp tasks: %s", resp.Names)
+
+	failedTasks := make([]string, 0)
+	activeTasks := make([]string, 0)
+	doneTasks := make([]string, 0)
+	snapObjs := make(map[string]*crdv1.VolumeSnapshot)
+	snapDataObjs := make(map[string]*crdv1.VolumeSnapshotData)
+	for _, taskID := range resp.Names {
+		csStatus := p.getCloudSnapStatus(api.CloudBackupOp, taskID)
+		if csStatus.status == api.CloudBackupStatusFailed {
+			logrus.Errorf(csStatus.msg)
+			failedTasks = append(failedTasks, taskID)
+			continue
+		}
+
+		if csStatus.status == api.CloudBackupStatusDone {
+			doneTasks = append(doneTasks, taskID)
+		} else {
+			activeTasks = append(activeTasks, taskID)
+		}
+
+		parentPVCOrVolID, err := p.getPVCNameFromVolumeID(csStatus.sourceVolumeID)
+		if err != nil {
+			return nil, err
+		}
+
+		snapObj, snapDataObj, err := p.getVolumeSnapshotAndDataObjects(
+			csStatus.cloudSnapID,
+			parentPVCOrVolID,
+			parentObject,
+			csStatus.status == api.CloudBackupStatusDone,
+			csStatus.status != api.CloudBackupStatusNotStarted,
+			csStatus.msg)
+		if err != nil {
+			err = fmt.Errorf("failed to create VolumeSnapshot object for PX cloud snapshot: %s due to: %v", csStatus.cloudSnapID, err)
+			return nil, err
+		}
+
+		if snapObj.Metadata.Annotations == nil {
+			snapObj.Metadata.Annotations = make(map[string]string)
+		}
+
+		snapObj.Metadata.Annotations[pxCloudSnapshotTaskIDKey] = taskID
+		snapDataObj.Spec.VolumeSnapshotDataSource.PortworxSnapshot.SnapshotType = crdv1.PortworxSnapshotTypeCloud
+		snapObjs[taskID] = snapObj
+		snapDataObjs[taskID] = snapDataObj
+	}
+
+	return p.processCloudsnapTasks(doneTasks, failedTasks, activeTasks, snapObjs, snapDataObjs)
+}
+
+func (p *portworx) GetGroupSnapshotStatus(snap *stork_crd.GroupVolumeSnapshot) (
+	[]*crdv1.VolumeSnapshot, error) {
+	snapType, err := getSnapshotType(snap.Spec.Options)
+	if err != nil {
+		return nil, err
+	}
+	switch snapType {
+	case crdv1.PortworxSnapshotTypeCloud:
+		logrus.Infof("[debug] get cloud snapshot status")
+		return p.getGroupCloudSnapStatus(snap)
+	case crdv1.PortworxSnapshotTypeLocal:
+		return nil, fmt.Errorf("status API not supported for local group snapshots")
+	}
+
+	return nil, fmt.Errorf("unsupported snapshot type: %s", snapType)
+}
+
+func (p *portworx) DeleteGroupSnapshot(snap *stork_crd.GroupVolumeSnapshot) error {
+	var lastError error
+	for _, vs := range snap.Status.VolumeSnapshots {
+		snapNamespace := vs.Metadata.Namespace
+		snapName := vs.Metadata.Name
+
+		err := k8s.Instance().DeleteSnapshot(snapName, snapNamespace)
+		if err != nil {
+			if !k8s_errors.IsNotFound(err) {
+				log.SnapshotLog(vs).Errorf("failed to delete snapshot due to: %v", err)
+				lastError = err
+			}
+		}
+	}
+
+	return lastError
+}
+
+func (p *portworx) getGroupCloudSnapStatus(snap *stork_crd.GroupVolumeSnapshot) ([]*crdv1.VolumeSnapshot, error) {
+	if len(snap.Status.VolumeSnapshots) == 0 {
+		return nil, fmt.Errorf("group cloudsnapshot has 0 snapshots in status")
+	}
+
+	failedTasks := make([]string, 0)
+	activeTasks := make([]string, 0)
+	doneTasks := make([]string, 0)
+	snapObjs := make(map[string]*crdv1.VolumeSnapshot)
+	snapDataObjs := make(map[string]*crdv1.VolumeSnapshotData)
+	for _, snapshot := range snap.Status.VolumeSnapshots {
+		taskID, present := snapshot.Metadata.Annotations[pxCloudSnapshotTaskIDKey]
+		if !present {
+			return nil, fmt.Errorf("snapshot: [%s] %s does not have task ID present",
+				snapshot.Metadata.Namespace, snapshot.Metadata.Name)
+		}
+
+		csStatus := p.getCloudSnapStatus(api.CloudBackupOp, taskID)
+
+		if csStatus.status == api.CloudBackupStatusFailed {
+			logrus.Errorf(csStatus.msg)
+			failedTasks = append(failedTasks, taskID)
+			continue
+		}
+
+		if csStatus.status == api.CloudBackupStatusDone {
+			doneTasks = append(doneTasks, taskID)
+		} else {
+			activeTasks = append(activeTasks, taskID)
+		}
+
+		snapObj, snapDataObj, err := p.getVolumeSnapshotAndDataObjects(
+			csStatus.cloudSnapID,
+			snapshot.Spec.PersistentVolumeClaimName,
+			snap,
+			csStatus.status == api.CloudBackupStatusDone,
+			csStatus.status != api.CloudBackupStatusNotStarted,
+			csStatus.msg)
+		if err != nil {
+			err = fmt.Errorf("failed to create VolumeSnapshot object for PX cloud snapshot: %s due to: %v", csStatus.cloudSnapID, err)
+			return nil, err
+		}
+
+		if snapObj.Metadata.Annotations == nil {
+			snapObj.Metadata.Annotations = make(map[string]string)
+		}
+		snapObj.Metadata.Annotations[pxCloudSnapshotTaskIDKey] = taskID
+		snapDataObj.Spec.VolumeSnapshotDataSource.PortworxSnapshot.SnapshotType = crdv1.PortworxSnapshotTypeCloud
+		snapObjs[taskID] = snapObj
+		snapDataObjs[taskID] = snapDataObj
+	}
+
+	return p.processCloudsnapTasks(doneTasks, failedTasks, activeTasks, snapObjs, snapDataObjs)
+}
+
+func (p *portworx) processCloudsnapTasks(
+	doneTasks []string,
+	failedTasks []string,
+	activeTasks []string,
+	snapObjs map[string]*crdv1.VolumeSnapshot,
+	snapDataObjs map[string]*crdv1.VolumeSnapshotData) (
+	[]*crdv1.VolumeSnapshot, error) {
+
+	if len(failedTasks) > 0 {
+		p.revertPXCloudSnaps(activeTasks)
+
+		return nil, fmt.Errorf("all cloud snapshots in the group did not succeed. failed: %v done: %v active: %v",
+			failedTasks, doneTasks, activeTasks)
+	}
+
+	responseSnapObjs := make([]*crdv1.VolumeSnapshot, 0)
+
+	var err error
+	for taskID, snapObj := range snapObjs {
+		if len(doneTasks) == len(snapObjs) {
+			// since all tasks are done, create the volumesnapshot and data objects
+			snapDataObj, present := snapDataObjs[taskID]
+			if !present {
+				return nil, fmt.Errorf("could not find snapshotdata object for task: %s", taskID)
+			}
+
+			snapObj, snapDataObj, err = p.createSnapAndSnapData(snapObj, snapDataObj)
+			if err != nil {
+				p.revertPXCloudSnaps(activeTasks)
+				p.revertPXCloudSnaps(doneTasks)
+
+				err = fmt.Errorf("failed to create VolumeSnapshot object for group snapshot due to: %v", err)
+				return nil, err
+			}
+		}
+
+		responseSnapObjs = append(responseSnapObjs, snapObj)
+	}
+
+	return responseSnapObjs, nil
+}
+
+func (p *portworx) createSnapAndSnapData(snap *crdv1.VolumeSnapshot, snapData *crdv1.VolumeSnapshotData) (
+	*crdv1.VolumeSnapshot, *crdv1.VolumeSnapshotData, error) {
+	var (
+		createdSnap     *crdv1.VolumeSnapshot
+		createdSnapData *crdv1.VolumeSnapshotData
+	)
+
+	createdSnapData, err := k8s.Instance().CreateSnapshotData(snapData)
+	if err != nil {
+		err = fmt.Errorf("error creating the VolumeSnapshotData for snap %s due to err: %v",
+			snap.Metadata.Name, err)
+		logrus.Errorf(err.Error())
+		return nil, nil, err
+	}
+
+	log.SnapshotLog(snap).Infof("creating VolumeSnapshot object")
+	createdSnap, err = k8s.Instance().CreateSnapshot(snap)
+	if err != nil {
+		// revert snapdata
+		deleteErr := k8s.Instance().DeleteSnapshotData(snapData.Metadata.Name)
+		if deleteErr != nil {
+			log.SnapshotLog(snap).Errorf("failed to revert volumesnapshotdata due to: %v", deleteErr)
+		}
+
+		return nil, nil, err
+	}
+
+	return createdSnap, createdSnapData, err
+}
+
+func (p *portworx) getVolumeNamesForGroupID(namespace, groupID string) ([]string, error) {
+	volNames := make([]string, 0)
+
+	scs, err := k8s.Instance().GetStorageClasses(nil)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, sc := range scs.Items {
+		if sc.Parameters != nil {
+			groupIDInSC, present := sc.Parameters[api.SpecGroup]
+			logrus.Infof("[debug] checking pvcs for group ID: %s", groupID)
+			if present && strings.TrimSpace(groupIDInSC) == groupID {
+				pvcsForSC, err := k8s.Instance().GetPVCsUsingStorageClass(sc.GetName())
+				if err != nil {
+					return nil, err
+				}
+
+				logrus.Infof("[debug] pvcs matched for group ID: %s are: %v", groupID, pvcsForSC)
+				for _, pvc := range pvcsForSC {
+					volName, err := k8s.Instance().GetVolumeForPersistentVolumeClaim(&pvc)
+					if err != nil {
+						return nil, err
+					}
+					volNames = append(volNames, volName)
+				}
+			} else {
+				logrus.Infof("[debug] no match for sc: %s", sc.GetName())
+			}
+		}
+	}
+	return volNames, nil
 }
 
 func init() {

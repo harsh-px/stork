@@ -20,6 +20,10 @@ const (
 	MigrationResourceName = "migration"
 	// MigrationResourcePlural is plural for "migration" resource
 	MigrationResourcePlural = "migrations"
+	// GroupSnapshotResourceName is name for "groupvolumesnapshot" resource
+	GroupSnapshotResourceName = "groupvolumesnapshot"
+	// GroupSnapshotResourcePlural is plural for the "groupvolumesnapshot" resource
+	GroupSnapshotResourcePlural = "groupvolumesnapshots"
 )
 
 // +genclient
@@ -282,6 +286,10 @@ const (
 type GroupVolumeSnapshotStageType string
 
 const (
+	// GroupSnapshotStageInitial is when the group snapshot is just created
+	GroupSnapshotStageInitial GroupVolumeSnapshotStageType = ""
+	// GroupSnapshotStagePrechecks is when the group snapshot is going through prechecks
+	GroupSnapshotStagePrechecks GroupVolumeSnapshotStageType = "Prechecks"
 	// GroupSnapshotStagePreSnapshot is when the pre-snapshot rule is executing for the group snapshot
 	GroupSnapshotStagePreSnapshot GroupVolumeSnapshotStageType = "PreSnapshot"
 	// GroupSnapshotStageSnapshot is when the snapshots are being taken for the group snapshot
