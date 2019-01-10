@@ -28,3 +28,24 @@ func GetPVCsForGroupSnapshot(namespace string, matchLabels map[string]string) ([
 
 	return pvcList.Items, nil
 }
+
+// GetVolumeNamesFromLabelSelector returns PV names for all PVCs in given namespace that match the given
+// labels
+func GetVolumeNamesFromLabelSelector(namespace string, labels map[string]string) ([]string, error) {
+	pvcs, err := GetPVCsForGroupSnapshot(namespace, labels)
+	if err != nil {
+		return nil, err
+	}
+
+	volNames := make([]string, 0)
+	for _, pvc := range pvcs {
+		volName, err := k8s.Instance().GetVolumeForPersistentVolumeClaim(&pvc)
+		if err != nil {
+			return nil, err
+		}
+
+		volNames = append(volNames, volName)
+	}
+
+	return volNames, nil
+}

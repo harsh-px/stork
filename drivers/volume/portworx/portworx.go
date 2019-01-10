@@ -544,19 +544,23 @@ func (p *portworx) SnapshotCreate(
 			infoStr := fmt.Sprintf("Creating group snapshot: [%s] %s", snap.Metadata.Namespace, snap.Metadata.Name)
 			if len(groupID) > 0 {
 				infoStr = fmt.Sprintf("%s. Group ID: %s", infoStr, groupID)
-				groupIDVolNames, err := getVolumeNamesFromLabelSelector(snap.Metadata.Namespace, groupLabels)
+				pvcList, err := p.getPVCsForGroupID(snap.Metadata.Namespace, groupID)
 				if err != nil {
 					return nil, getErrorSnapshotConditions(err), err
 				}
 
-				if len(groupIDVolNames) > 0 {
-					volNames = append(volNames, groupIDVolNames...)
+				for _, pvc := range pvcList {
+					volName, err := k8s.Instance().GetVolumeForPersistentVolumeClaim(&pvc)
+					if err != nil {
+						return nil, getErrorSnapshotConditions(err), err
+					}
+					volNames = append(volNames, volName)
 				}
 			}
 
 			if len(groupLabels) > 0 {
 				infoStr = fmt.Sprintf("%s. Group labels: %v", infoStr, groupLabels)
-				labelVolNames, err := getVolumeNamesFromLabelSelector(snap.Metadata.Namespace, groupLabels)
+				labelVolNames, err := k8sutils.GetVolumeNamesFromLabelSelector(snap.Metadata.Namespace, groupLabels)
 				if err != nil {
 					return nil, getErrorSnapshotConditions(err), err
 				}
@@ -1308,13 +1312,13 @@ func (p *portworx) getPVCsForSnapshot(snap *crdv1.VolumeSnapshot) ([]v1.Persiste
 			}
 
 			if len(groupLabels) > 0 {
-				pvcList, err := k8s.Instance().GetPersistentVolumeClaims(snap.Metadata.Namespace, groupLabels)
+				pvcList, err := k8sutils.GetPVCsForGroupSnapshot(snap.Metadata.Namespace, groupLabels)
 				if err != nil {
 					return nil, err
 				}
 
-				log.SnapshotLog(snap).Infof("found PVCs with group labels: %v", pvcList.Items)
-				pvcs = append(pvcs, pvcList.Items...)
+				log.SnapshotLog(snap).Infof("found PVCs with group labels: %v", pvcList)
+				pvcs = append(pvcs, pvcList...)
 			}
 
 			for _, pvc := range pvcs {
@@ -1679,25 +1683,6 @@ func (p *portworx) UpdateMigratedPersistentVolumeSpec(
 	return object, nil
 }
 
-func getVolumeNamesFromLabelSelector(namespace string, labels map[string]string) ([]string, error) {
-	pvcs, err := k8sutils.GetPVCsForGroupSnapshot(namespace, labels)
-	if err != nil {
-		return nil, err
-	}
-
-	volNames := make([]string, 0)
-	for _, pvc := range pvcs {
-		volName, err := k8s.Instance().GetVolumeForPersistentVolumeClaim(&pvc)
-		if err != nil {
-			return nil, err
-		}
-
-		volNames = append(volNames, volName)
-	}
-
-	return volNames, nil
-}
-
 func (p *portworx) CreateGroupSnapshot(snap *stork_crd.GroupVolumeSnapshot) (
 	[]*crdv1.VolumeSnapshot, error) {
 	ok, msg, err := p.ensureNodesHaveMinVersion("2.0.2")
@@ -1714,7 +1699,7 @@ func (p *portworx) CreateGroupSnapshot(snap *stork_crd.GroupVolumeSnapshot) (
 		return nil, err
 	}
 
-	volNames, err := getVolumeNamesFromLabelSelector(snap.Namespace, snap.Spec.PVCSelector.MatchLabels)
+	volNames, err := k8sutils.GetVolumeNamesFromLabelSelector(snap.Namespace, snap.Spec.PVCSelector.MatchLabels)
 	if err != nil {
 		return nil, err
 	}
