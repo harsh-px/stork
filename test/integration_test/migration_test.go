@@ -3,7 +3,9 @@
 package integrationtest
 
 import (
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/portworx/torpedo/drivers/scheduler"
 	"github.com/stretchr/testify/require"
@@ -26,6 +28,7 @@ func triggerMigrationTest(
 	appKey string,
 	migrationAppKey string,
 	migrationSuccessExpected bool,
+	waitForMigrationCheck time.Duration,
 ) {
 	var err error
 	// schedule mysql app on cluster 1
@@ -48,6 +51,9 @@ func triggerMigrationTest(
 	err = schedulerDriver.AddTasks(ctxs[0],
 		scheduler.ScheduleOptions{AppKeys: []string{migrationAppKey}})
 	require.NoError(t, err, "Error scheduling migration specs")
+
+	fmt.Printf("waiting for %v before checking migrations", waitForMigrationCheck)
+	time.Sleep(waitForMigrationCheck)
 
 	// Reset config in case of error
 	defer func() {
@@ -83,6 +89,7 @@ func deploymentMigrationTest(t *testing.T) {
 		"mysql-1-pvc",
 		"mysql-migration",
 		true,
+		time.Duration(0),
 	)
 }
 
@@ -93,6 +100,7 @@ func statefulsetMigrationTest(t *testing.T) {
 		"cassandra",
 		"cassandra-migration",
 		true,
+		time.Duration(0),
 	)
 }
 
@@ -103,6 +111,7 @@ func statefulsetMigrationRuleTest(t *testing.T) {
 		"cassandra",
 		"cassandra-migration-rule",
 		true,
+		time.Duration(0),
 	)
 }
 
@@ -113,6 +122,7 @@ func statefulsetMigrationRulePreExecMissingTest(t *testing.T) {
 		"mysql-1-pvc",
 		"mysql-migration-pre-exec-missing",
 		false,
+		time.Duration(0),
 	)
 }
 func statefulsetMigrationRulePostExecMissingTest(t *testing.T) {
@@ -122,6 +132,7 @@ func statefulsetMigrationRulePostExecMissingTest(t *testing.T) {
 		"mysql-1-pvc",
 		"mysql-migration-post-exec-missing",
 		false,
+		time.Duration(0),
 	)
 }
 
@@ -132,6 +143,7 @@ func migrationDisallowedNamespaceTest(t *testing.T) {
 		"mysql-1-pvc",
 		"mysql-migration-disallowed-ns",
 		false,
+		time.Duration(0),
 	)
 }
 
@@ -142,6 +154,7 @@ func migrationFailingPreExecRuleTest(t *testing.T) {
 		"mysql-1-pvc",
 		"mysql-migration-failing-pre-exec",
 		false,
+		time.Duration(0),
 	)
 }
 
@@ -152,5 +165,18 @@ func migrationFailingPostExecRuleTest(t *testing.T) {
 		"mysql-1-pvc",
 		"mysql-migration-failing-post-exec",
 		false,
+		time.Duration(0),
+	)
+}
+
+/**** migration schedule tests *****/
+func migrationIntervalScheduleTest(t *testing.T) {
+	triggerMigrationTest(
+		t,
+		"mysql-migration-schedule",
+		"mysql-1-pvc",
+		"mysql-migration-schedule",
+		true,
+		5*time.Minute,
 	)
 }
