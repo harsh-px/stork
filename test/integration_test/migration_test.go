@@ -13,13 +13,13 @@ import (
 
 func testMigration(t *testing.T) {
 	t.Run("deploymentTest", deploymentMigrationTest)
-	t.Run("statefulsetTest", statefulsetMigrationTest)
+	/*t.Run("statefulsetTest", statefulsetMigrationTest)
 	t.Run("statefulsetRuleTest", statefulsetMigrationRuleTest)
 	t.Run("preExecRuleMissingTest", statefulsetMigrationRulePreExecMissingTest)
 	t.Run("postExecRuleMissingTest", statefulsetMigrationRulePostExecMissingTest)
 	t.Run("disallowedNamespaceTest", migrationDisallowedNamespaceTest)
 	t.Run("failingPreExecRuleTest", migrationFailingPreExecRuleTest)
-	t.Run("failingPostExecRuleTest", migrationFailingPostExecRuleTest)
+	t.Run("failingPostExecRuleTest", migrationFailingPostExecRuleTest)*/
 }
 
 func triggerMigrationTest(
