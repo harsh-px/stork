@@ -229,6 +229,10 @@ func validateSpec(in interface{}) (interface{}, error) {
 		return specObj, nil
 	} else if specObj, ok := in.(*stork_api.Migration); ok {
 		return specObj, nil
+	} else if specObj, ok := in.(*stork_api.MigrationSchedule); ok {
+		return specObj, nil
+	} else if specObj, ok := in.(*stork_api.SchedulePolicy); ok {
+		return specObj, nil
 	}
 
 	return nil, fmt.Errorf("Unsupported object: %v", reflect.TypeOf(in))
@@ -793,6 +797,15 @@ func (k *k8s) WaitForRunning(ctx *scheduler.Context, timeout, retryInterval time
 				}
 			}
 			logrus.Infof("[%v] Validated Migration: %v", ctx.App.Key, obj.Name)
+		} else if obj, ok := spec.(*stork_api.MigrationSchedule); ok {
+			if err := k8sOps.ValidateMigrationSchedule(obj.Name, obj.Namespace, timeout, retryInterval); err != nil {
+				return &scheduler.ErrFailedToValidateCustomSpec{
+					Name:  obj.Name,
+					Cause: fmt.Sprintf("Failed to validate MigrationSchedule: %v. Err: %v", obj.Name, err),
+					Type:  obj,
+				}
+			}
+			logrus.Infof("[%v] Validated MigrationSchedule: %v", ctx.App.Key, obj.Name)
 		} else {
 			logrus.Infof("[%v] Skipping validate for %v", ctx.App.Key, reflect.TypeOf(spec))
 		}
@@ -1665,6 +1678,27 @@ func (k *k8s) createMigrationObjects(
 		}
 		logrus.Infof("[%v] Created Migration: %v", app.Key, migration.Name)
 		return migration, nil
+	} else if obj, ok := specObj.(*stork_api.MigrationSchedule); ok {
+		obj.Namespace = ns.Name
+		migrationSchedule, err := k8sOps.CreateMigrationSchedule(obj)
+		if err != nil {
+			return nil, &scheduler.ErrFailedToScheduleApp{
+				App:   app,
+				Cause: fmt.Sprintf("Failed to create MigrationSchedule: %v. Err: %v", obj.Name, err),
+			}
+		}
+		logrus.Infof("[%v] Created MigrationSchedule: %v", app.Key, migrationSchedule.Name)
+		return migrationSchedule, nil
+	} else if obj, ok := specObj.(*stork_api.SchedulePolicy); ok {
+		schedPolicy, err := k8sOps.CreateSchedulePolicy(obj)
+		if err != nil {
+			return nil, &scheduler.ErrFailedToScheduleApp{
+				App:   app,
+				Cause: fmt.Sprintf("Failed to create SchedulePolicy: %v. Err: %v", obj.Name, err),
+			}
+		}
+		logrus.Infof("[%v] Created SchedulePolicy: %v", app.Key, schedPolicy.Name)
+		return schedPolicy, nil
 	}
 
 	return nil, nil
@@ -1693,6 +1727,24 @@ func (k *k8s) destroyMigrationObject(
 			}
 		}
 		logrus.Infof("[%v] Destroyed Migration: %v", app.Key, obj.Name)
+	} else if obj, ok := specObj.(*stork_api.MigrationSchedule); ok {
+		err := k8sOps.DeleteMigrationSchedule(obj.Name, obj.Namespace)
+		if err != nil {
+			return &scheduler.ErrFailedToDestroyApp{
+				App:   app,
+				Cause: fmt.Sprintf("Failed to delete MigrationSchedule: %v. Err: %v", obj.Name, err),
+			}
+		}
+		logrus.Infof("[%v] Destroyed MigrationSchedule: %v", app.Key, obj.Name)
+	} else if obj, ok := specObj.(*stork_api.SchedulePolicy); ok {
+		err := k8sOps.DeleteSchedulePolicy(obj.Name)
+		if err != nil {
+			return &scheduler.ErrFailedToDestroyApp{
+				App:   app,
+				Cause: fmt.Sprintf("Failed to delete SchedulePolicy: %v. Err: %v", obj.Name, err),
+			}
+		}
+		logrus.Infof("[%v] Destroyed SchedulePolicy: %v", app.Key, obj.Name)
 	}
 	return nil
 }

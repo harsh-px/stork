@@ -496,6 +496,8 @@ type MigrationOps interface {
 	ListMigrationSchedules(string) (*v1alpha1.MigrationScheduleList, error)
 	// DeleteMigrationSchedule deletes the MigrationSchedule
 	DeleteMigrationSchedule(string, string) error
+	// ValidateMigrationSchedule validate the Migration status
+	ValidateMigrationSchedule(string, string, time.Duration, time.Duration) error
 }
 
 // ObjectOps is an interface to perform generic Object operations
@@ -3262,6 +3264,75 @@ func (k *k8sOps) DeleteMigrationSchedule(name string, namespace string) error {
 	return k.storkClient.Stork().MigrationSchedules(namespace).Delete(name, &meta_v1.DeleteOptions{
 		PropagationPolicy: &deleteForegroundPolicy,
 	})
+}
+
+func (k *k8sOps) ValidateMigrationSchedule(name string, namespace string, timeout, retryInterval time.Duration) error {
+	if err := k.initK8sClient(); err != nil {
+		return err
+	}
+	t := func() (interface{}, bool, error) {
+		resp, err := k.GetMigrationSchedule(name, namespace)
+		if err != nil {
+			return "", true, err
+		}
+
+		if len(resp.Status.Items) == 0 {
+			return "", true, &ErrFailedToValidateCustomSpec{
+				Name:  name,
+				Cause: fmt.Sprintf("0 migrations have yet run for the migration schedule"),
+				Type:  resp,
+			}
+		}
+
+		failedMigrations := make([]string, 0)
+		pendingMigrations := make([]string, 0)
+		for policyType, migrationStatuses := range resp.Status.Items {
+			logrus.Infof("[debug] checking statuses for type: %v", policyType)
+			// The check below assumes that the status will not have a failed migration if the last one succeeded
+			// so just get the last status
+			if len(migrationStatuses) > 0 {
+				status := migrationStatuses[len(migrationStatuses)-1]
+				if status == nil || status.Status == v1alpha1.MigrationStatusSuccessful {
+					logrus.Infof("[debug] migration: %s done", status.Name)
+					continue
+				} else if status.Status == v1alpha1.MigrationStatusFailed {
+					logrus.Infof("[debug] migration: %s failed", status.Name)
+					failedMigrations = append(failedMigrations,
+						fmt.Sprintf("migration: %s failed. status: %v", status.Name, status.Status))
+				} else {
+					logrus.Infof("[debug] migration: %s not done", status.Name)
+					pendingMigrations = append(pendingMigrations,
+						fmt.Sprintf("migration: %s is not done. status: %v", status.Name, status.Status))
+				}
+			}
+		}
+
+		if len(failedMigrations) > 0 {
+			return "", false, &ErrFailedToValidateCustomSpec{
+				Name: name,
+				Cause: fmt.Sprintf("MigrationSchedule failed as one or more migrations have failed. %s",
+					failedMigrations),
+				Type: resp,
+			}
+		}
+
+		if len(pendingMigrations) > 0 {
+			return "", true, &ErrFailedToValidateCustomSpec{
+				Name: name,
+				Cause: fmt.Sprintf("MigrationSchedule has certain migrations pending: %s",
+					pendingMigrations),
+				Type: resp,
+			}
+		}
+
+		return "", false, nil
+	}
+
+	if _, err := task.DoRetryWithTimeout(t, timeout, retryInterval); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // Migration APIs - END
