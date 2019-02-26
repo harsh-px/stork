@@ -1692,6 +1692,13 @@ func (k *k8s) createMigrationObjects(
 	} else if obj, ok := specObj.(*stork_api.SchedulePolicy); ok {
 		schedPolicy, err := k8sOps.CreateSchedulePolicy(obj)
 		if err != nil {
+			if errors.IsAlreadyExists(err) {
+				if schedPolicy, err = k8sOps.GetSchedulePolicy(obj.Name); err == nil {
+					logrus.Infof("[%v] Found existing schedule policy: %v", app.Key, schedPolicy.Name)
+					return schedPolicy, nil
+				}
+			}
+
 			return nil, &scheduler.ErrFailedToScheduleApp{
 				App:   app,
 				Cause: fmt.Sprintf("Failed to create SchedulePolicy: %v. Err: %v", obj.Name, err),

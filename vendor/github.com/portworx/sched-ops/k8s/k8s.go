@@ -3286,21 +3286,27 @@ func (k *k8sOps) ValidateMigrationSchedule(name string, namespace string, timeou
 
 		failedMigrations := make([]string, 0)
 		pendingMigrations := make([]string, 0)
-		for policyType, migrationStatuses := range resp.Status.Items {
-			logrus.Infof("[debug] checking statuses for type: %v", policyType)
+		for _, migrationStatuses := range resp.Status.Items {
 			// The check below assumes that the status will not have a failed migration if the last one succeeded
 			// so just get the last status
 			if len(migrationStatuses) > 0 {
 				status := migrationStatuses[len(migrationStatuses)-1]
-				if status == nil || status.Status == v1alpha1.MigrationStatusSuccessful {
-					logrus.Infof("[debug] migration: %s done", status.Name)
+				if status == nil {
+					return "", true, &ErrFailedToValidateCustomSpec{
+						Name:  name,
+						Cause: "MigrationSchedule has an empty migration in it's most recent status",
+						Type:  resp,
+					}
+				}
+
+				if status.Status == v1alpha1.MigrationStatusSuccessful {
 					continue
-				} else if status.Status == v1alpha1.MigrationStatusFailed {
-					logrus.Infof("[debug] migration: %s failed", status.Name)
+				}
+
+				if status.Status == v1alpha1.MigrationStatusFailed {
 					failedMigrations = append(failedMigrations,
 						fmt.Sprintf("migration: %s failed. status: %v", status.Name, status.Status))
 				} else {
-					logrus.Infof("[debug] migration: %s not done", status.Name)
 					pendingMigrations = append(pendingMigrations,
 						fmt.Sprintf("migration: %s is not done. status: %v", status.Name, status.Status))
 				}

@@ -3,23 +3,24 @@
 package integrationtest
 
 import (
-	"fmt"
 	"testing"
 	"time"
 
 	"github.com/portworx/torpedo/drivers/scheduler"
+	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
 )
 
 func testMigration(t *testing.T) {
-	t.Run("deploymentTest", deploymentMigrationTest)
-	/*t.Run("statefulsetTest", statefulsetMigrationTest)
+	/*t.Run("deploymentTest", deploymentMigrationTest)
+	t.Run("statefulsetTest", statefulsetMigrationTest)
 	t.Run("statefulsetRuleTest", statefulsetMigrationRuleTest)
 	t.Run("preExecRuleMissingTest", statefulsetMigrationRulePreExecMissingTest)
 	t.Run("postExecRuleMissingTest", statefulsetMigrationRulePostExecMissingTest)
 	t.Run("disallowedNamespaceTest", migrationDisallowedNamespaceTest)
 	t.Run("failingPreExecRuleTest", migrationFailingPreExecRuleTest)
 	t.Run("failingPostExecRuleTest", migrationFailingPostExecRuleTest)*/
+	t.Run("migrationIntervalScheduleTest", migrationIntervalScheduleTest)
 }
 
 func triggerMigrationTest(
@@ -29,6 +30,7 @@ func triggerMigrationTest(
 	migrationAppKey string,
 	migrationSuccessExpected bool,
 	waitForMigrationCheck time.Duration,
+	startAppsOnMigration bool,
 ) {
 	var err error
 	// schedule mysql app on cluster 1
@@ -52,7 +54,7 @@ func triggerMigrationTest(
 		scheduler.ScheduleOptions{AppKeys: []string{migrationAppKey}})
 	require.NoError(t, err, "Error scheduling migration specs")
 
-	fmt.Printf("waiting for %v before checking migrations", waitForMigrationCheck)
+	logrus.Infof("bumping time of the world for migration controller by %v before checking migrations", waitForMigrationCheck)
 	time.Sleep(waitForMigrationCheck)
 
 	// Reset config in case of error
@@ -68,8 +70,18 @@ func triggerMigrationTest(
 		// wait on cluster 2 to get mysql pod running
 		err = setRemoteConfig(remoteFilePath)
 		require.NoError(t, err, "Error setting remote config")
-		err = schedulerDriver.WaitForRunning(preMigrationCtx, defaultWaitTimeout, defaultWaitInterval)
-		require.NoError(t, err, "Error waiting for pod to get to running state on remote cluster after migration")
+
+		if startAppsOnMigration {
+			err = schedulerDriver.WaitForRunning(preMigrationCtx, defaultWaitTimeout, defaultWaitInterval)
+			require.NoError(t, err, "Error waiting for pod to get to running state on remote cluster after migration")
+		}
+
+		/* Failing right now as SC's are not migrated
+		* else {
+			logrus.Infof("test only validating storage components as migration has startApplications disabled")
+			err = schedulerDriver.InspectVolumes(preMigrationCtx, defaultWaitTimeout, defaultWaitInterval)
+			require.NoError(t, err, "Error validating storage components on remote cluster after migration")
+		}*/
 		// destroy mysql app on cluster 2
 		destroyAndWait(t, []*scheduler.Context{preMigrationCtx})
 	} else {
@@ -90,6 +102,7 @@ func deploymentMigrationTest(t *testing.T) {
 		"mysql-migration",
 		true,
 		time.Duration(0),
+		true,
 	)
 }
 
@@ -101,6 +114,7 @@ func statefulsetMigrationTest(t *testing.T) {
 		"cassandra-migration",
 		true,
 		time.Duration(0),
+		true,
 	)
 }
 
@@ -112,6 +126,7 @@ func statefulsetMigrationRuleTest(t *testing.T) {
 		"cassandra-migration-rule",
 		true,
 		time.Duration(0),
+		true,
 	)
 }
 
@@ -123,6 +138,7 @@ func statefulsetMigrationRulePreExecMissingTest(t *testing.T) {
 		"mysql-migration-pre-exec-missing",
 		false,
 		time.Duration(0),
+		true,
 	)
 }
 func statefulsetMigrationRulePostExecMissingTest(t *testing.T) {
@@ -133,6 +149,7 @@ func statefulsetMigrationRulePostExecMissingTest(t *testing.T) {
 		"mysql-migration-post-exec-missing",
 		false,
 		time.Duration(0),
+		true,
 	)
 }
 
@@ -144,6 +161,7 @@ func migrationDisallowedNamespaceTest(t *testing.T) {
 		"mysql-migration-disallowed-ns",
 		false,
 		time.Duration(0),
+		true,
 	)
 }
 
@@ -155,6 +173,7 @@ func migrationFailingPreExecRuleTest(t *testing.T) {
 		"mysql-migration-failing-pre-exec",
 		false,
 		time.Duration(0),
+		true,
 	)
 }
 
@@ -166,6 +185,7 @@ func migrationFailingPostExecRuleTest(t *testing.T) {
 		"mysql-migration-failing-post-exec",
 		false,
 		time.Duration(0),
+		true,
 	)
 }
 
@@ -177,6 +197,7 @@ func migrationIntervalScheduleTest(t *testing.T) {
 		"mysql-1-pvc",
 		"mysql-migration-schedule",
 		true,
-		5*time.Minute,
+		6*time.Minute,
+		false,
 	)
 }

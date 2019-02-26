@@ -19,8 +19,9 @@ const (
 
 var mockTime *time.Time
 
-// Used in test to update the time
-func setMockTime(mt time.Time) {
+// SetMockTime is used in tests to update the time
+func SetMockTime(mt time.Time) {
+	logrus.Debugf("Setting mock time to: %v", mt)
 	mockTime = &mt
 }
 
