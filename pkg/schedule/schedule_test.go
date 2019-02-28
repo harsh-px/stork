@@ -56,7 +56,7 @@ func triggerIntervalRequiredTest(t *testing.T) {
 	required, err := TriggerRequired("missingpolicy", stork_api.SchedulePolicyTypeInterval, meta.Date(2019, time.February, 7, 23, 14, 0, 0, time.Local))
 	require.Error(t, err, "Should return error for missing policy")
 
-	SetMockTime(time.Date(2019, time.February, 7, 23, 16, 0, 0, time.Local))
+	setMockTime(time.Date(2019, time.February, 7, 23, 16, 0, 0, time.Local))
 	// Last triggered 2 mins ago
 	required, err = TriggerRequired("intervalpolicy", stork_api.SchedulePolicyTypeInterval, meta.Date(2019, time.February, 7, 23, 14, 0, 0, time.Local))
 	require.NoError(t, err, "Error checking if trigger required")
@@ -88,7 +88,7 @@ func triggerDailyRequiredTest(t *testing.T) {
 	required, err := TriggerRequired("missingpolicy", stork_api.SchedulePolicyTypeDaily, meta.Date(2019, time.February, 7, 23, 14, 0, 0, time.Local))
 	require.Error(t, err, "Should return error for missing policy")
 
-	SetMockTime(time.Date(2019, time.February, 7, 23, 16, 0, 0, time.Local))
+	setMockTime(time.Date(2019, time.February, 7, 23, 16, 0, 0, time.Local))
 	// Last triggered before schedule
 	required, err = TriggerRequired("dailypolicy", stork_api.SchedulePolicyTypeDaily, meta.Date(2019, time.February, 7, 23, 14, 0, 0, time.Local))
 	require.NoError(t, err, "Error checking if trigger required")
@@ -128,7 +128,7 @@ func triggerWeeklyRequiredTest(t *testing.T) {
 	required, err := TriggerRequired("missingpolicy", stork_api.SchedulePolicyTypeWeekly, meta.Date(2019, time.February, 7, 23, 14, 0, 0, time.Local))
 	require.Error(t, err, "Should return error for missing policy")
 
-	SetMockTime(time.Date(2019, time.February, 7, 23, 16, 0, 0, time.Local)) // Current day: Thursday
+	setMockTime(time.Date(2019, time.February, 7, 23, 16, 0, 0, time.Local)) // Current day: Thursday
 	// LastTriggered one week before on Saturday at 11:15pm
 	required, err = TriggerRequired("weeklypolicy", stork_api.SchedulePolicyTypeWeekly, meta.Date(2019, time.February, 2, 23, 16, 0, 0, time.Local))
 	require.NoError(t, err, "Error checking if trigger required")
@@ -139,7 +139,7 @@ func triggerWeeklyRequiredTest(t *testing.T) {
 	require.NoError(t, err, "Error checking if trigger required")
 	require.False(t, required, "Trigger should not have been required")
 
-	SetMockTime(time.Date(2019, time.February, 10, 23, 16, 0, 0, time.Local)) // Current date: Sunday 11:16pm
+	setMockTime(time.Date(2019, time.February, 10, 23, 16, 0, 0, time.Local)) // Current date: Sunday 11:16pm
 	// LastTriggered last Wednesday at 11:16pm
 	required, err = TriggerRequired("weeklypolicy", stork_api.SchedulePolicyTypeWeekly, meta.Date(2019, time.February, 6, 23, 16, 0, 0, time.Local))
 	require.NoError(t, err, "Error checking if trigger required")
@@ -163,7 +163,7 @@ func triggerMonthlyRequiredTest(t *testing.T) {
 	required, err := TriggerRequired("missingpolicy", stork_api.SchedulePolicyTypeMonthly, meta.Date(2019, time.February, 7, 23, 14, 0, 0, time.Local))
 	require.Error(t, err, "Should return error for missing policy")
 
-	SetMockTime(time.Date(2019, time.February, 28, 23, 16, 0, 0, time.Local))
+	setMockTime(time.Date(2019, time.February, 28, 23, 16, 0, 0, time.Local))
 	// Last triggered before schedule
 	required, err = TriggerRequired("monthlypolicy", stork_api.SchedulePolicyTypeMonthly, meta.Date(2019, time.February, 2, 23, 16, 0, 0, time.Local))
 	require.NoError(t, err, "Error checking if trigger required")

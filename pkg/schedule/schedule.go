@@ -1,35 +1,63 @@
 package schedule
 
 import (
+	"io/ioutil"
+	"os"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/libopenstorage/stork/pkg/apis/stork"
 	stork_api "github.com/libopenstorage/stork/pkg/apis/stork/v1alpha1"
 	"github.com/portworx/sched-ops/k8s"
+	"github.com/sirupsen/logrus"
 	apiextensionsv1beta1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 const (
 	validateCRDInterval time.Duration = 5 * time.Second
 	validateCRDTimeout  time.Duration = 1 * time.Minute
+	mockTimeFilePath                  = "/etc/mock-time"
+	// StorkTestModeEnvVariable is env variable to enable test mode features in stork
+	StorkTestModeEnvVariable = "TEST_MODE"
+	// MockTimeConfigMapName is the name of the config map used to mock times
+	MockTimeConfigMapName = "stork-mock-time"
+	// MockTimeConfigMapNamespace is the namespace of the config map used to mock times
+	MockTimeConfigMapNamespace = "kube-system"
 )
 
 var mockTime *time.Time
 
-// SetMockTime is used in tests to update the time
-func SetMockTime(mt time.Time) {
-	logrus.Debugf("Setting mock time to: %v", mt)
+// setMockTime is used in tests to update the time
+func setMockTime(mt time.Time) {
 	mockTime = &mt
 }
 
-func getCurrentTime() time.Time {
-	if mockTime != nil {
-		return *mockTime
+func getCurrentTime() (time.Time, error) {
+	// Check if mock-time file exists
+	if dat, err := ioutil.ReadFile(mockTimeFilePath); err == nil {
+		data := strings.TrimSpace(string(dat))
+		if len(data) > 0 {
+			logrus.Infof("[debug] found mock time: %s", data)
+			layout := "Mon, 01/02/06, 03:04PM"
+			t, err := time.Parse(layout, data)
+			if err != nil {
+				logrus.Errorf("failed to parse mock time: %s in file due to: %v", data, err)
+				return time.Now(), err
+			}
+
+			logrus.Infof("[debug] parsed mock time: %v", t)
+			return t, nil
+		}
 	}
-	return time.Now()
+
+	if mockTime != nil {
+		return *mockTime, nil
+	}
+	return time.Now(), nil
 }
 
 // TriggerRequired Check if a trigger is required for a policy given the last
@@ -47,7 +75,12 @@ func TriggerRequired(
 	if err := ValidateSchedulePolicy(schedulePolicy); err != nil {
 		return false, err
 	}
-	now := getCurrentTime()
+
+	now, err := getCurrentTime()
+	if err != nil {
+		return false, err
+	}
+
 	switch policyType {
 	case stork_api.SchedulePolicyTypeInterval:
 		if schedulePolicy.Policy.Interval == nil {
@@ -163,6 +196,36 @@ func Init() error {
 	if err != nil {
 		return err
 	}
+
+	testMode := os.Getenv(StorkTestModeEnvVariable)
+	if testMode == "true" {
+
+		fn := func(object runtime.Object) error {
+			logrus.Infof("[debug] watch triggered for configmap: %v", object)
+			return nil
+		}
+
+		logrus.Infof("Stork test mode enabled. Watching for config map: %s for mock times", MockTimeConfigMapName)
+		cm, err := k8s.Instance().GetConfigMap(MockTimeConfigMapName, MockTimeConfigMapNamespace)
+		if err != nil {
+			if errors.IsNotFound(err) {
+				logrus.Infof("Stork in test mode, however no config map present to mock time. Skipping.")
+				return nil
+			}
+
+			logrus.Errorf("failed to get config map: %s due to: %v", MockTimeConfigMapName, err)
+			return err
+		}
+
+		cm = cm.DeepCopy()
+
+		err = k8s.Instance().WatchConfigMap(cm, fn)
+		if err != nil {
+			logrus.Errorf("failed to watch on config map: %s due to: %v", MockTimeConfigMapName, err)
+			return err
+		}
+	}
+
 	return nil
 }
 

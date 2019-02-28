@@ -14,7 +14,9 @@ import (
 
 	storkdriver "github.com/libopenstorage/stork/drivers/volume"
 	_ "github.com/libopenstorage/stork/drivers/volume/portworx"
+	"github.com/libopenstorage/stork/pkg/schedule"
 	"github.com/libopenstorage/stork/pkg/storkctl"
+	"github.com/portworx/sched-ops/k8s"
 	k8s_ops "github.com/portworx/sched-ops/k8s"
 	"github.com/portworx/torpedo/drivers/node"
 	_ "github.com/portworx/torpedo/drivers/node/ssh"
@@ -25,19 +27,23 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/skyrings/skyring-common/tools/uuid"
 	"github.com/stretchr/testify/require"
+	"k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
+	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
 const (
-	nodeDriverName      = "ssh"
-	volumeDriverName    = "pxd"
-	schedulerDriverName = "k8s"
-	remotePairName      = "remoteclusterpair"
-	remoteConfig        = "remoteconfigmap"
-	specDir             = "./specs"
-	pairFilePath        = "./specs/cluster-pair"
-	pairFileName        = pairFilePath + "/cluster-pair.yaml"
-	remoteFilePath      = "/tmp/kubeconfig"
+	nodeDriverName        = "ssh"
+	volumeDriverName      = "pxd"
+	schedulerDriverName   = "k8s"
+	remotePairName        = "remoteclusterpair"
+	remoteConfig          = "remoteconfigmap"
+	specDir               = "./specs"
+	pairFilePath          = "./specs/cluster-pair"
+	pairFileName          = pairFilePath + "/cluster-pair.yaml"
+	remoteFilePath        = "/tmp/kubeconfig"
+	configMapSyncWaitTime = 70 * time.Second // little over 1 min
 
 	nodeScore   = 100
 	rackScore   = 50
@@ -353,6 +359,52 @@ func scheduleClusterPair(ctx *scheduler.Context) error {
 		return err
 	}
 
+	return nil
+}
+
+func setMockTime(t time.Time) error {
+	cm, err := k8s.Instance().GetConfigMap(schedule.MockTimeConfigMapName, schedule.MockTimeConfigMapNamespace)
+	if err != nil {
+		if !errors.IsNotFound(err) {
+			return err
+		}
+
+		// create new config map
+		data := map[string]string{
+			"time": t.String(),
+		}
+
+		cm := &v1.ConfigMap{
+			ObjectMeta: meta_v1.ObjectMeta{
+				Name:      schedule.MockTimeConfigMapName,
+				Namespace: schedule.MockTimeConfigMapNamespace,
+			},
+			Data: data,
+		}
+		_, err = k8s.Instance().CreateConfigMap(cm)
+		return err
+	}
+
+	// update existing config map
+	cmCopy := cm.DeepCopy()
+	if len(cmCopy.Data) == 0 {
+		cmCopy.Data = make(map[string]string)
+	}
+
+	cmCopy.Data["time"] = t.String()
+	_, err = k8s.Instance().UpdateConfigMap(cmCopy)
+	if err != nil {
+		return err
+	}
+
+	// from https://kubernetes.io/docs/tasks/configure-pod-container/configure-pod-configmap/
+	// When a ConfigMap already being consumed in a volume is updated, projected keys are
+	// eventually updated as well. Kubelet is checking whether the mounted ConfigMap is fresh on
+	// every periodic sync. However, it is using its local ttl-based cache for getting the current
+	// value of the ConfigMap. As a result, the total delay from the moment when the ConfigMap is
+	// updated to the moment when new keys are projected to the pod can be as long as kubelet
+	// sync period + ttl of ConfigMaps cache in kubelet.
+	time.Sleep(configMapSyncWaitTime)
 	return nil
 }
 
